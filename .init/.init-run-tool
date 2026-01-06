@@ -1,0 +1,4 @@
+{
+    "command": "PORT=<port> HOST=<host> BROWSER=none npm start",
+    "working_directory": "/home/kavia/workspace/code-generation/roadrescue-quickassist-platform-41193-41204/frontend_mechanic_portal"
+}
