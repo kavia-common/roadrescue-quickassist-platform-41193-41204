@@ -1,5 +1,4 @@
 import { createClient } from "@supabase/supabase-js";
-import { isSupabaseConfigured } from "../theme";
 
 const LS_KEYS = {
   session: "rrqa.session",
@@ -60,10 +59,25 @@ function ensureSeedData() {
   writeJson(LS_KEYS.seeded, true);
 }
 
+function getSupabaseEnv() {
+  const url = process.env.REACT_APP_SUPABASE_URL;
+  const key = process.env.REACT_APP_SUPABASE_KEY;
+  return { url, key };
+}
+
+// PUBLIC_INTERFACE
+function isSupabaseConfigured() {
+  /** Returns true only when required REACT_APP_ Supabase env vars are present (React build-time). */
+  const { url, key } = getSupabaseEnv();
+  return Boolean(url && key);
+}
+
 function getSupabase() {
-  if (!isSupabaseConfigured()) return null;
+  const { url, key } = getSupabaseEnv();
+  if (!url || !key) return null;
+
   try {
-    return createClient(process.env.REACT_APP_SUPABASE_URL, process.env.REACT_APP_SUPABASE_KEY);
+    return createClient(url, key);
   } catch {
     return null;
   }
@@ -322,4 +336,7 @@ export const dataService = {
     setLocalUsers(users);
     return true;
   },
+
+  // PUBLIC_INTERFACE
+  isSupabaseConfigured,
 };
