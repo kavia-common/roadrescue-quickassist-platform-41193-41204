@@ -69,7 +69,19 @@ export function DashboardPage({ user }) {
           columns={[
             { key: "id", header: "Request", render: (r) => <Link className="link" to={`/requests/${r.id}`}>{r.id.slice(0, 8)}</Link> },
             { key: "createdAt", header: "Created", render: (r) => new Date(r.createdAt).toLocaleString() },
-            { key: "vehicle", header: "Vehicle", render: (r) => `${r.vehicle.make} ${r.vehicle.model}` },
+            {
+              key: "vehicle",
+              header: "Vehicle",
+              render: (r) => {
+                // Compose 'Make Model' with null/undefined guard
+                const make = r.vehicle?.make || "";
+                const model = r.vehicle?.model || "";
+                if (make && model) return `${make} ${model}`;
+                if (make) return make;
+                if (model) return model;
+                return "—";
+              }
+            },
             { key: "status", header: "Status", render: (r) => statusBadge(r.status) },
             {
               key: "action",

@@ -69,18 +69,44 @@ export function RequestDetailPage({ user }) {
       <div className="grid2">
         <Card title="Customer & contact">
           <div className="kv">
-            <div><span className="k">Customer</span><span className="v">{req.userEmail}</span></div>
-            <div><span className="k">Contact</span><span className="v">{req.contact.name}</span></div>
-            <div><span className="k">Phone</span><span className="v">{req.contact.phone}</span></div>
+            <div>
+              <span className="k">Customer</span>
+              <span className="v">{req.userEmail || "—"}</span>
+            </div>
+            <div>
+              <span className="k">Contact</span>
+              <span className="v">{req.contact?.name || "—"}</span>
+            </div>
+            <div>
+              <span className="k">Phone</span>
+              <span className="v">{req.contact?.phone || "—"}</span>
+            </div>
+            <div>
+              <span className="k">Email</span>
+              <span className="v">{req.contact?.email || "—"}</span>
+            </div>
           </div>
         </Card>
 
         <Card title="Vehicle">
           <div className="kv">
-            <div><span className="k">Make</span><span className="v">{req.vehicle.make}</span></div>
-            <div><span className="k">Model</span><span className="v">{req.vehicle.model}</span></div>
-            <div><span className="k">Year</span><span className="v">{req.vehicle.year || "—"}</span></div>
-            <div><span className="k">Plate</span><span className="v">{req.vehicle.plate || "—"}</span></div>
+            <div>
+              <span className="k">Make</span>
+              <span className="v">{req.vehicle?.make || "—"}</span>
+            </div>
+            <div>
+              <span className="k">Model</span>
+              <span className="v">{req.vehicle?.model || "—"}</span>
+            </div>
+            <div>
+              <span className="k">Year</span>
+              <span className="v">{req.vehicle?.year || "—"}</span>
+            </div>
+            {/* Plate only shown in request detail, stay canonical */}
+            <div>
+              <span className="k">Plate</span>
+              <span className="v">{req.vehicle?.plate || "—"}</span>
+            </div>
           </div>
         </Card>
       </div>

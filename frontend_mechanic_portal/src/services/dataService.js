@@ -257,9 +257,20 @@ export const dataService = {
         createdAt: r.created_at,
         userId: r.user_id,
         userEmail: r.user_email,
-        vehicle: r.vehicle,
+        // Canonical vehicle shape: {make,model,year,plate}
+        vehicle: {
+          make: r.vehicle?.make || "",
+          model: r.vehicle?.model || "",
+          year: r.vehicle?.year || "",
+          plate: r.vehicle?.plate || "",
+        },
         issueDescription: r.issue_description,
-        contact: r.contact,
+        // Canonical contact shape
+        contact: {
+          name: r.contact?.name || "",
+          phone: r.contact?.phone || "",
+          email: r.contact?.email || "",
+        },
         status: r.status,
         assignedMechanicId: r.assigned_mechanic_id,
         assignedMechanicEmail: r.assigned_mechanic_email,
