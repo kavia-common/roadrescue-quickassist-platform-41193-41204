@@ -1,0 +1,325 @@
+import { createClient } from "@supabase/supabase-js";
+import { isSupabaseConfigured } from "../theme";
+
+const LS_KEYS = {
+  session: "rrqa.session",
+  users: "rrqa.users",
+  requests: "rrqa.requests",
+  fees: "rrqa.fees",
+  seeded: "rrqa.seeded",
+};
+
+function uid(prefix = "id") {
+  return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now().toString(16)}`;
+}
+
+function readJson(key, fallback) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJson(key, value) {
+  window.localStorage.setItem(key, JSON.stringify(value));
+}
+
+function ensureSeedData() {
+  const seeded = readJson(LS_KEYS.seeded, false);
+  if (seeded) return;
+
+  const users = [
+    { id: uid("u"), email: "user@example.com", password: "password123", role: "user", approved: true },
+    { id: uid("m"), email: "mech@example.com", password: "password123", role: "mechanic", approved: false, profile: { name: "Alex Mechanic", serviceArea: "Downtown" } },
+    { id: uid("a"), email: "admin@example.com", password: "password123", role: "admin", approved: true },
+  ];
+
+  const now = new Date().toISOString();
+  const requests = [
+    {
+      id: uid("req"),
+      createdAt: now,
+      userId: users[0].id,
+      userEmail: users[0].email,
+      vehicle: { make: "Toyota", model: "Corolla", year: "2016", plate: "ABC-123" },
+      issueDescription: "Car won't start, clicking noise.",
+      contact: { name: "Sam Driver", phone: "555-0101" },
+      status: "Submitted",
+      assignedMechanicId: null,
+      assignedMechanicEmail: null,
+      notes: [],
+    },
+  ];
+
+  writeJson(LS_KEYS.users, users);
+  writeJson(LS_KEYS.requests, requests);
+  writeJson(LS_KEYS.fees, { baseFee: 25, perMile: 2.0, afterHoursMultiplier: 1.25 });
+  writeJson(LS_KEYS.seeded, true);
+}
+
+function getSupabase() {
+  if (!isSupabaseConfigured()) return null;
+  try {
+    return createClient(process.env.REACT_APP_SUPABASE_URL, process.env.REACT_APP_SUPABASE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function getLocalSession() {
+  return readJson(LS_KEYS.session, null);
+}
+function setLocalSession(session) {
+  writeJson(LS_KEYS.session, session);
+}
+function clearLocalSession() {
+  window.localStorage.removeItem(LS_KEYS.session);
+}
+function getLocalUsers() {
+  return readJson(LS_KEYS.users, []);
+}
+function setLocalUsers(users) {
+  writeJson(LS_KEYS.users, users);
+}
+function getLocalRequests() {
+  return readJson(LS_KEYS.requests, []);
+}
+function setLocalRequests(reqs) {
+  writeJson(LS_KEYS.requests, reqs);
+}
+
+async function supaGetUserRole(supabase, userId, email) {
+  try {
+    const { data, error } = await supabase.from("profiles").select("role,approved,profile").eq("id", userId).maybeSingle();
+    if (error) return { role: "user", approved: true, profile: null };
+    if (!data) {
+      await supabase.from("profiles").insert({ id: userId, email, role: "user", approved: true });
+      return { role: "user", approved: true, profile: null };
+    }
+    return { role: data.role || "user", approved: data.approved ?? true, profile: data.profile || null };
+  } catch {
+    return { role: "user", approved: true, profile: null };
+  }
+}
+
+// PUBLIC_INTERFACE
+export const dataService = {
+  /** Mechanic portal facade: login/logout + request acceptance and status updates. */
+
+  // PUBLIC_INTERFACE
+  async login(email, password) {
+    ensureSeedData();
+    const supabase = getSupabase();
+    if (supabase) {
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) throw new Error(error.message);
+      const user = data.user;
+      const roleInfo = await supaGetUserRole(supabase, user.id, user.email);
+      return { id: user.id, email: user.email, role: roleInfo.role, approved: roleInfo.approved, profile: roleInfo.profile };
+    }
+
+    const users = getLocalUsers();
+    const match = users.find((u) => u.email.toLowerCase() === email.toLowerCase() && u.password === password);
+    if (!match) throw new Error("Invalid email or password.");
+    setLocalSession({ userId: match.id });
+    return { id: match.id, email: match.email, role: match.role, approved: match.approved, profile: match.profile };
+  },
+
+  // PUBLIC_INTERFACE
+  async logout() {
+    const supabase = getSupabase();
+    if (supabase) {
+      await supabase.auth.signOut();
+      return;
+    }
+    clearLocalSession();
+  },
+
+  // PUBLIC_INTERFACE
+  async getCurrentUser() {
+    ensureSeedData();
+    const supabase = getSupabase();
+    if (supabase) {
+      const { data } = await supabase.auth.getUser();
+      const user = data?.user;
+      if (!user) return null;
+      const roleInfo = await supaGetUserRole(supabase, user.id, user.email);
+      return { id: user.id, email: user.email, role: roleInfo.role, approved: roleInfo.approved, profile: roleInfo.profile };
+    }
+
+    const session = getLocalSession();
+    if (!session?.userId) return null;
+    const users = getLocalUsers();
+    const u = users.find((x) => x.id === session.userId);
+    if (!u) return null;
+    return { id: u.id, email: u.email, role: u.role, approved: u.approved, profile: u.profile };
+  },
+
+  // PUBLIC_INTERFACE
+  async listUnassignedRequests() {
+    ensureSeedData();
+    const supabase = getSupabase();
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("requests")
+        .select("*")
+        .is("assigned_mechanic_id", null)
+        .order("created_at", { ascending: false });
+      if (error) throw new Error(error.message);
+      return (data || []).map((r) => ({
+        id: r.id,
+        createdAt: r.created_at,
+        userId: r.user_id,
+        userEmail: r.user_email,
+        vehicle: r.vehicle,
+        issueDescription: r.issue_description,
+        contact: r.contact,
+        status: r.status,
+        assignedMechanicId: r.assigned_mechanic_id,
+        assignedMechanicEmail: r.assigned_mechanic_email,
+        notes: r.notes || [],
+      }));
+    }
+
+    const all = getLocalRequests();
+    return all.filter((r) => !r.assignedMechanicId && (r.status === "Submitted" || r.status === "In Review"));
+  },
+
+  // PUBLIC_INTERFACE
+  async listMyAssignments(mechanicId) {
+    ensureSeedData();
+    const supabase = getSupabase();
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("requests")
+        .select("*")
+        .eq("assigned_mechanic_id", mechanicId)
+        .order("created_at", { ascending: false });
+      if (error) throw new Error(error.message);
+      return (data || []).map((r) => ({
+        id: r.id,
+        createdAt: r.created_at,
+        userId: r.user_id,
+        userEmail: r.user_email,
+        vehicle: r.vehicle,
+        issueDescription: r.issue_description,
+        contact: r.contact,
+        status: r.status,
+        assignedMechanicId: r.assigned_mechanic_id,
+        assignedMechanicEmail: r.assigned_mechanic_email,
+        notes: r.notes || [],
+      }));
+    }
+
+    const all = getLocalRequests();
+    return all.filter((r) => r.assignedMechanicId === mechanicId);
+  },
+
+  // PUBLIC_INTERFACE
+  async getRequestById(requestId) {
+    const supabase = getSupabase();
+    if (supabase) {
+      const { data, error } = await supabase.from("requests").select("*").eq("id", requestId).maybeSingle();
+      if (error) throw new Error(error.message);
+      if (!data) return null;
+      return {
+        id: data.id,
+        createdAt: data.created_at,
+        userId: data.user_id,
+        userEmail: data.user_email,
+        vehicle: data.vehicle,
+        issueDescription: data.issue_description,
+        contact: data.contact,
+        status: data.status,
+        assignedMechanicId: data.assigned_mechanic_id,
+        assignedMechanicEmail: data.assigned_mechanic_email,
+        notes: data.notes || [],
+      };
+    }
+
+    const all = getLocalRequests();
+    return all.find((r) => r.id === requestId) || null;
+  },
+
+  // PUBLIC_INTERFACE
+  async acceptRequest({ requestId, mechanic }) {
+    ensureSeedData();
+    const note = { id: uid("n"), at: new Date().toISOString(), by: mechanic.email, text: "Accepted request." };
+
+    const supabase = getSupabase();
+    if (supabase) {
+      const existing = await this.getRequestById(requestId);
+      const { error } = await supabase
+        .from("requests")
+        .update({
+          assigned_mechanic_id: mechanic.id,
+          assigned_mechanic_email: mechanic.email,
+          status: "Accepted",
+          notes: [...(existing?.notes || []), note],
+        })
+        .eq("id", requestId);
+      if (error) throw new Error(error.message);
+      return true;
+    }
+
+    const all = getLocalRequests();
+    const idx = all.findIndex((r) => r.id === requestId);
+    if (idx < 0) throw new Error("Request not found.");
+    const r = all[idx];
+    if (r.assignedMechanicId) throw new Error("Request already assigned.");
+    all[idx] = {
+      ...r,
+      assignedMechanicId: mechanic.id,
+      assignedMechanicEmail: mechanic.email,
+      status: "Accepted",
+      notes: [...(r.notes || []), note],
+    };
+    setLocalRequests(all);
+    return true;
+  },
+
+  // PUBLIC_INTERFACE
+  async updateRequestStatus({ requestId, status, mechanic, noteText }) {
+    ensureSeedData();
+    const note = { id: uid("n"), at: new Date().toISOString(), by: mechanic.email, text: noteText || `Status changed to ${status}.` };
+
+    const supabase = getSupabase();
+    if (supabase) {
+      const existing = await this.getRequestById(requestId);
+      const { error } = await supabase
+        .from("requests")
+        .update({ status, notes: [...(existing?.notes || []), note] })
+        .eq("id", requestId);
+      if (error) throw new Error(error.message);
+      return true;
+    }
+
+    const all = getLocalRequests();
+    const idx = all.findIndex((r) => r.id === requestId);
+    if (idx < 0) throw new Error("Request not found.");
+    all[idx] = { ...all[idx], status, notes: [...(all[idx].notes || []), note] };
+    setLocalRequests(all);
+    return true;
+  },
+
+  // PUBLIC_INTERFACE
+  async updateProfile({ userId, profile }) {
+    ensureSeedData();
+    const supabase = getSupabase();
+    if (supabase) {
+      const { error } = await supabase.from("profiles").update({ profile }).eq("id", userId);
+      if (error) throw new Error(error.message);
+      return true;
+    }
+
+    const users = getLocalUsers();
+    const idx = users.findIndex((u) => u.id === userId);
+    if (idx < 0) throw new Error("User not found.");
+    users[idx] = { ...users[idx], profile };
+    setLocalUsers(users);
+    return true;
+  },
+};
