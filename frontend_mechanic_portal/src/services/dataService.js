@@ -115,16 +115,99 @@ function setLocalRequests(reqs) {
  * - alternate column names like make/model/year/plate
  */
 function normalizeVehicle(raw) {
-  const v = raw?.vehicle && typeof raw.vehicle === "object" ? raw.vehicle : {};
-  const make = v.make ?? raw?.vehicle_make ?? raw?.make ?? "";
-  const model = v.model ?? raw?.vehicle_model ?? raw?.model ?? "";
-  const year = v.year ?? raw?.vehicle_year ?? raw?.year ?? "";
-  const plate = v.plate ?? raw?.vehicle_plate ?? raw?.plate ?? "";
+  /**
+   * Canonicalize vehicle fields into:
+   *   { make, model, year, plate }
+   *
+   * Supabase deployments differ; request rows might store vehicle as:
+   *  - requests.vehicle (JSONB)
+   *  - flat columns: vehicle_make / vehicle_model / vehicle_year / vehicle_plate
+   *  - flat columns: make / model / year / plate
+   *  - nested JSON objects: vehicle_info, vehicleDetails, etc.
+   *  - joined shapes: { request: { ... } } or { requests: { ... } }
+   *
+   * This function is intentionally defensive: it attempts multiple known shapes
+   * without assuming any one schema exists.
+   */
+  const safeObj = (x) => (x && typeof x === "object" ? x : null);
+
+  // If we accidentally receive a wrapper (e.g. assignments join), unwrap it.
+  const base =
+    safeObj(raw?.request) ||
+    safeObj(raw?.requests) ||
+    safeObj(raw) ||
+    {};
+
+  // Candidate objects that may contain vehicle fields.
+  const vehicleCandidates = [
+    safeObj(base?.vehicle),
+    safeObj(base?.vehicle_info),
+    safeObj(base?.vehicleInfo),
+    safeObj(base?.vehicle_details),
+    safeObj(base?.vehicleDetails),
+    safeObj(base?.car),
+    safeObj(base?.car_info),
+    safeObj(base?.carInfo),
+  ].filter(Boolean);
+
+  // Also support a case where vehicle is stored under a generic JSON payload.
+  const detailsCandidates = [
+    safeObj(base?.details),
+    safeObj(base?.meta),
+    safeObj(base?.metadata),
+    safeObj(base?.payload),
+    safeObj(base?.data),
+  ].filter(Boolean);
+
+  const nestedVehicleFromDetails = detailsCandidates
+    .map((d) => safeObj(d?.vehicle) || safeObj(d?.vehicle_info) || safeObj(d?.vehicleInfo) || safeObj(d?.car) || safeObj(d?.carInfo))
+    .filter(Boolean);
+
+  const allCandidates = [...vehicleCandidates, ...nestedVehicleFromDetails];
+
+  // Helper: return the first non-empty (non-null/undefined/empty-string) value
+  const first = (...vals) => {
+    for (const v of vals) {
+      if (v === 0) return v; // allow numeric year 0 (unlikely, but safe)
+      if (v === false) return v;
+      if (v === null || v === undefined) continue;
+      if (typeof v === "string" && v.trim() === "") continue;
+      return v;
+    }
+    return "";
+  };
+
+  // Pull from JSON candidates first, then fall back to flat columns.
+  const make = first(
+    ...allCandidates.map((c) => c.make || c.Make || c.brand || c.manufacturer),
+    base?.vehicle_make,
+    base?.make
+  );
+
+  const model = first(
+    ...allCandidates.map((c) => c.model || c.Model),
+    base?.vehicle_model,
+    base?.model
+  );
+
+  const year = first(
+    ...allCandidates.map((c) => c.year || c.Year),
+    base?.vehicle_year,
+    base?.year
+  );
+
+  // Plates are very inconsistent; support a few common aliases.
+  const plate = first(
+    ...allCandidates.map((c) => c.plate || c.Plate || c.licensePlate || c.license_plate || c.registration || c.reg),
+    base?.vehicle_plate,
+    base?.plate
+  );
+
   return {
-    make: make || "",
-    model: model || "",
-    year: year || "",
-    plate: plate || "",
+    make: typeof make === "string" ? make.trim() : `${make}`,
+    model: typeof model === "string" ? model.trim() : `${model}`,
+    year: typeof year === "string" ? year.trim() : year ? `${year}` : "",
+    plate: typeof plate === "string" ? plate.trim() : plate ? `${plate}` : "",
   };
 }
 

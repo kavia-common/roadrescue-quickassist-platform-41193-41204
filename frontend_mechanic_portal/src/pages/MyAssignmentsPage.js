@@ -14,6 +14,13 @@ function statusBadge(status) {
   return <span className={map[status] || "badge"}>{status}</span>;
 }
 
+function renderVehicleCell(vehicle) {
+  const make = vehicle?.make || "";
+  const model = vehicle?.model || "";
+  const label = `${make} ${model}`.trim();
+  return label || "—";
+}
+
 // PUBLIC_INTERFACE
 export function MyAssignmentsPage({ user }) {
   /** Shows requests assigned to current mechanic. */
@@ -50,15 +57,7 @@ export function MyAssignmentsPage({ user }) {
             {
               key: "vehicle",
               header: "Vehicle",
-              render: (r) => {
-                // Compose 'Make Model' with null/undefined guard
-                const make = r.vehicle?.make || "";
-                const model = r.vehicle?.model || "";
-                if (make && model) return `${make} ${model}`;
-                if (make) return make;
-                if (model) return model;
-                return "—";
-              }
+              render: (r) => renderVehicleCell(r.vehicle),
             },
             { key: "status", header: "Status", render: (r) => statusBadge(r.status) },
             { key: "userEmail", header: "Customer", render: (r) => r.userEmail },
