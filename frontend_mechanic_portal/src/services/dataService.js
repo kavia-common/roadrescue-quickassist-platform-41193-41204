@@ -324,23 +324,27 @@ export const dataService = {
 
       /**
        * We expect an `assignments` table with a FK to `requests`:
-       * - assignments: { id, mechanic_id, request_id, accepted_at }
+       * - assignments: { id, mechanic_id, request_id, created_at? }
        * - requests: existing requests row
+       *
+       * IMPORTANT: Some deployments do NOT have assignments.accepted_at. Avoid selecting/ordering by it.
        *
        * This query shape assumes a relationship exists in Supabase:
        * assignments.request_id -> requests.id
        */
       const { data, error } = await supabase
         .from("assignments")
-        .select("id, mechanic_id, request_id, accepted_at, request:requests(*)")
+        .select("id, mechanic_id, request_id, request:requests(*)")
         .eq("mechanic_id", effectiveMechanicId)
-        .order("accepted_at", { ascending: false });
+        // Prefer deterministic ordering without relying on optional columns.
+        .order("request_id", { ascending: false });
 
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load assignments."));
 
       // Normalize to the same row shape used by the existing rendering code (requests-like rows).
+      // Some schemas may expose the join under `request` (aliased) or `requests` depending on relationship config.
       return (data || [])
-        .map((a) => a?.request)
+        .map((a) => a?.request || a?.requests)
         .filter(Boolean)
         .map(normalizeRequestRow);
     }
@@ -392,13 +396,13 @@ export const dataService = {
       }
 
       // 1) Upsert assignment row (idempotent)
+      // Do NOT write assignments.accepted_at because it may not exist in the deployed schema.
       const { error: upsertErr } = await supabase
         .from("assignments")
         .upsert(
           {
             mechanic_id: mechanicId,
             request_id: requestId,
-            accepted_at: new Date().toISOString(),
           },
           { onConflict: "request_id" }
         );
