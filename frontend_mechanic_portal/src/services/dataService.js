@@ -107,6 +107,57 @@ function setLocalRequests(reqs) {
   writeJson(LS_KEYS.requests, reqs);
 }
 
+/**
+ * Extracts {make, model, year, plate} from various possible DB shapes.
+ * Supports:
+ * - JSONB `vehicle` object
+ * - flat columns like vehicle_make/vehicle_model
+ * - alternate column names like make/model/year/plate
+ */
+function normalizeVehicle(raw) {
+  const v = raw?.vehicle && typeof raw.vehicle === "object" ? raw.vehicle : {};
+  const make = v.make ?? raw?.vehicle_make ?? raw?.make ?? "";
+  const model = v.model ?? raw?.vehicle_model ?? raw?.model ?? "";
+  const year = v.year ?? raw?.vehicle_year ?? raw?.year ?? "";
+  const plate = v.plate ?? raw?.vehicle_plate ?? raw?.plate ?? "";
+  return {
+    make: make || "",
+    model: model || "",
+    year: year || "",
+    plate: plate || "",
+  };
+}
+
+/**
+ * Extracts contact {name, phone, email} from various possible DB shapes.
+ * Supports:
+ * - JSONB `contact` object
+ * - flat columns like contact_name/contact_phone/contact_email
+ */
+function normalizeContact(raw) {
+  const c = raw?.contact && typeof raw.contact === "object" ? raw.contact : {};
+  const name = c.name ?? raw?.contact_name ?? "";
+  const phone = c.phone ?? raw?.contact_phone ?? "";
+  const email = c.email ?? raw?.contact_email ?? "";
+  return { name: name || "", phone: phone || "", email: email || "" };
+}
+
+function normalizeRequestRow(r) {
+  return {
+    id: r.id,
+    createdAt: r.created_at ?? r.createdAt ?? "",
+    userId: r.user_id ?? r.userId ?? "",
+    userEmail: r.user_email ?? r.userEmail ?? "",
+    vehicle: normalizeVehicle(r),
+    issueDescription: r.issue_description ?? r.issueDescription ?? "",
+    contact: normalizeContact(r),
+    status: r.status ?? "",
+    assignedMechanicId: r.assigned_mechanic_id ?? r.assignedMechanicId ?? null,
+    assignedMechanicEmail: r.assigned_mechanic_email ?? r.assignedMechanicEmail ?? null,
+    notes: r.notes || [],
+  };
+}
+
 async function supaGetUserRole(supabase, userId, email) {
   try {
     const { data, error } = await supabase.from("profiles").select("role,approved,profile").eq("id", userId).maybeSingle();
@@ -119,6 +170,23 @@ async function supaGetUserRole(supabase, userId, email) {
   } catch {
     return { role: "user", approved: true, profile: null };
   }
+}
+
+async function requireSupabaseUser(supabase) {
+  const { data, error } = await supabase.auth.getUser();
+  if (error) throw new Error(error.message || "Authentication error.");
+  const user = data?.user;
+  if (!user) throw new Error("You must be signed in to perform this action.");
+  return user;
+}
+
+/** Extract a friendlier UI message from a supabase-js error (best-effort). */
+function friendlySupabaseErrorMessage(err, fallback) {
+  const msg = err?.message || "";
+  if (!msg) return fallback;
+  // Common RLS message in Supabase
+  if (msg.toLowerCase().includes("row level security")) return "Permission denied. Please contact an admin.";
+  return msg;
 }
 
 /**
@@ -164,28 +232,12 @@ export const dataService = {
         assigned_mechanic_email: null,
         notes: [],
       };
-      const { data, error } = await supabase
-        .from("requests")
-        .insert(insertPayload)
-        .select()
-        .maybeSingle();
+      const { data, error } = await supabase.from("requests").insert(insertPayload).select().maybeSingle();
 
-      if (error) throw new Error(error.message);
+      if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not create request."));
       if (!data) throw new Error("Failed to insert request.");
 
-      return {
-        id: data.id,
-        createdAt: data.created_at,
-        userId: data.user_id,
-        userEmail: data.user_email,
-        vehicle: data.vehicle,
-        issueDescription: data.issue_description,
-        contact: data.contact,
-        status: data.status,
-        assignedMechanicId: data.assigned_mechanic_id,
-        assignedMechanicEmail: data.assigned_mechanic_email,
-        notes: data.notes || [],
-      };
+      return normalizeRequestRow(data);
     }
 
     // In mock mode, assign a custom string ID.
@@ -200,7 +252,7 @@ export const dataService = {
     const supabase = getSupabase();
     if (supabase) {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) throw new Error(error.message);
+      if (error) throw new Error(friendlySupabaseErrorMessage(error, "Login failed."));
       const user = data.user;
       const roleInfo = await supaGetUserRole(supabase, user.id, user.email);
       return { id: user.id, email: user.email, role: roleInfo.role, approved: roleInfo.approved, profile: roleInfo.profile };
@@ -248,36 +300,9 @@ export const dataService = {
     ensureSeedData();
     const supabase = getSupabase();
     if (supabase) {
-      const { data, error } = await supabase
-        .from("requests")
-        .select("*")
-        .is("assigned_mechanic_id", null)
-        .order("created_at", { ascending: false });
-      if (error) throw new Error(error.message);
-      return (data || []).map((r) => ({
-        id: r.id,
-        createdAt: r.created_at,
-        userId: r.user_id,
-        userEmail: r.user_email,
-        // Canonical vehicle shape: {make,model,year,plate}
-        vehicle: {
-          make: r.vehicle?.make || "",
-          model: r.vehicle?.model || "",
-          year: r.vehicle?.year || "",
-          plate: r.vehicle?.plate || "",
-        },
-        issueDescription: r.issue_description,
-        // Canonical contact shape
-        contact: {
-          name: r.contact?.name || "",
-          phone: r.contact?.phone || "",
-          email: r.contact?.email || "",
-        },
-        status: r.status,
-        assignedMechanicId: r.assigned_mechanic_id,
-        assignedMechanicEmail: r.assigned_mechanic_email,
-        notes: r.notes || [],
-      }));
+      const { data, error } = await supabase.from("requests").select("*").is("assigned_mechanic_id", null).order("created_at", { ascending: false });
+      if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load requests."));
+      return (data || []).map(normalizeRequestRow);
     }
 
     const all = getLocalRequests();
@@ -288,39 +313,39 @@ export const dataService = {
   async listMyAssignments(mechanicId) {
     ensureSeedData();
     const supabase = getSupabase();
+
+    // Supabase mode: read from assignments and join back to request data.
     if (supabase) {
+      const authedUser = await requireSupabaseUser(supabase);
+
+      // Prefer the current session user id to avoid spoofing.
+      const effectiveMechanicId = authedUser.id || mechanicId;
+      if (!effectiveMechanicId) throw new Error("Missing mechanic id.");
+
+      /**
+       * We expect an `assignments` table with a FK to `requests`:
+       * - assignments: { id, mechanic_id, request_id, accepted_at }
+       * - requests: existing requests row
+       *
+       * This query shape assumes a relationship exists in Supabase:
+       * assignments.request_id -> requests.id
+       */
       const { data, error } = await supabase
-        .from("requests")
-        .select("*")
-        .eq("assigned_mechanic_id", mechanicId)
-        .order("created_at", { ascending: false });
-      if (error) throw new Error(error.message);
-      return (data || []).map((r) => ({
-        id: r.id,
-        createdAt: r.created_at,
-        userId: r.user_id,
-        userEmail: r.user_email,
-        // Canonical vehicle shape: {make,model,year,plate}
-        vehicle: {
-          make: r.vehicle?.make || "",
-          model: r.vehicle?.model || "",
-          year: r.vehicle?.year || "",
-          plate: r.vehicle?.plate || "",
-        },
-        issueDescription: r.issue_description,
-        // Canonical contact shape
-        contact: {
-          name: r.contact?.name || "",
-          phone: r.contact?.phone || "",
-          email: r.contact?.email || "",
-        },
-        status: r.status,
-        assignedMechanicId: r.assigned_mechanic_id,
-        assignedMechanicEmail: r.assigned_mechanic_email,
-        notes: r.notes || [],
-      }));
+        .from("assignments")
+        .select("id, mechanic_id, request_id, accepted_at, request:requests(*)")
+        .eq("mechanic_id", effectiveMechanicId)
+        .order("accepted_at", { ascending: false });
+
+      if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load assignments."));
+
+      // Normalize to the same row shape used by the existing rendering code (requests-like rows).
+      return (data || [])
+        .map((a) => a?.request)
+        .filter(Boolean)
+        .map(normalizeRequestRow);
     }
 
+    // Mock mode: requests are the source of truth.
     const all = getLocalRequests();
     return all.filter((r) => r.assignedMechanicId === mechanicId);
   },
@@ -330,21 +355,9 @@ export const dataService = {
     const supabase = getSupabase();
     if (supabase) {
       const { data, error } = await supabase.from("requests").select("*").eq("id", requestId).maybeSingle();
-      if (error) throw new Error(error.message);
+      if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load request."));
       if (!data) return null;
-      return {
-        id: data.id,
-        createdAt: data.created_at,
-        userId: data.user_id,
-        userEmail: data.user_email,
-        vehicle: data.vehicle,
-        issueDescription: data.issue_description,
-        contact: data.contact,
-        status: data.status,
-        assignedMechanicId: data.assigned_mechanic_id,
-        assignedMechanicEmail: data.assigned_mechanic_email,
-        notes: data.notes || [],
-      };
+      return normalizeRequestRow(data);
     }
 
     const all = getLocalRequests();
@@ -358,20 +371,61 @@ export const dataService = {
 
     const supabase = getSupabase();
     if (supabase) {
+      const authedUser = await requireSupabaseUser(supabase);
+
+      // Idempotency strategy:
+      // 1) Upsert into assignments on unique key (request_id) so repeated clicks do not duplicate.
+      // 2) Also update requests row to reflect assigned mechanic + status transition.
+      //
+      // NOTE: This assumes `assignments.request_id` is UNIQUE (recommended).
+      // If it's not unique, Supabase will error, which we surface in a friendly way.
+      const mechanicId = authedUser.id;
+      const mechanicEmail = authedUser.email || mechanic.email;
+
+      // Preload existing request for note append and to avoid overwriting notes incorrectly.
       const existing = await this.getRequestById(requestId);
-      const { error } = await supabase
+      if (!existing) throw new Error("Request not found.");
+
+      // If already assigned to someone else, stop (unless it's already assigned to this same mechanic).
+      if (existing.assignedMechanicId && existing.assignedMechanicId !== mechanicId) {
+        throw new Error("This request was already assigned to another mechanic.");
+      }
+
+      // 1) Upsert assignment row (idempotent)
+      const { error: upsertErr } = await supabase
+        .from("assignments")
+        .upsert(
+          {
+            mechanic_id: mechanicId,
+            request_id: requestId,
+            accepted_at: new Date().toISOString(),
+          },
+          { onConflict: "request_id" }
+        );
+
+      if (upsertErr) {
+        throw new Error(friendlySupabaseErrorMessage(upsertErr, "Could not accept this request."));
+      }
+
+      // 2) Update request row (status transition + linking fields)
+      const { error: reqErr } = await supabase
         .from("requests")
         .update({
-          assigned_mechanic_id: mechanic.id,
-          assigned_mechanic_email: mechanic.email,
-          status: "Accepted",
+          assigned_mechanic_id: mechanicId,
+          assigned_mechanic_email: mechanicEmail,
+          status: "assigned", // prefer DB-friendly status transition; UI still supports showing any status string
           notes: [...(existing?.notes || []), note],
         })
         .eq("id", requestId);
-      if (error) throw new Error(error.message);
+
+      if (reqErr) {
+        throw new Error(friendlySupabaseErrorMessage(reqErr, "Accepted assignment but failed to update request status."));
+      }
+
       return true;
     }
 
+    // Mock mode behavior intact
     const all = getLocalRequests();
     const idx = all.findIndex((r) => r.id === requestId);
     if (idx < 0) throw new Error("Request not found.");
@@ -396,11 +450,8 @@ export const dataService = {
     const supabase = getSupabase();
     if (supabase) {
       const existing = await this.getRequestById(requestId);
-      const { error } = await supabase
-        .from("requests")
-        .update({ status, notes: [...(existing?.notes || []), note] })
-        .eq("id", requestId);
-      if (error) throw new Error(error.message);
+      const { error } = await supabase.from("requests").update({ status, notes: [...(existing?.notes || []), note] }).eq("id", requestId);
+      if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not update status."));
       return true;
     }
 
@@ -418,7 +469,7 @@ export const dataService = {
     const supabase = getSupabase();
     if (supabase) {
       const { error } = await supabase.from("profiles").update({ profile }).eq("id", userId);
-      if (error) throw new Error(error.message);
+      if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not save profile."));
       return true;
     }
 
