@@ -32,7 +32,9 @@ function ensureSeedData() {
 
   const users = [
     { id: uid("u"), email: "user@example.com", password: "password123", role: "user", approved: true },
-    { id: uid("m"), email: "mech@example.com", password: "password123", role: "mechanic", approved: false, profile: { name: "Alex Mechanic", serviceArea: "Downtown" } },
+    // Demo mechanic should be able to exercise the primary flow (accepting requests)
+    // in mock mode without needing an admin approval step.
+    { id: uid("m"), email: "mech@example.com", password: "password123", role: "mechanic", approved: true, profile: { name: "Alex Mechanic", serviceArea: "Downtown" } },
     { id: uid("a"), email: "admin@example.com", password: "password123", role: "admin", approved: true },
   ];
 
@@ -298,9 +300,20 @@ export const dataService = {
         createdAt: r.created_at,
         userId: r.user_id,
         userEmail: r.user_email,
-        vehicle: r.vehicle,
+        // Canonical vehicle shape: {make,model,year,plate}
+        vehicle: {
+          make: r.vehicle?.make || "",
+          model: r.vehicle?.model || "",
+          year: r.vehicle?.year || "",
+          plate: r.vehicle?.plate || "",
+        },
         issueDescription: r.issue_description,
-        contact: r.contact,
+        // Canonical contact shape
+        contact: {
+          name: r.contact?.name || "",
+          phone: r.contact?.phone || "",
+          email: r.contact?.email || "",
+        },
         status: r.status,
         assignedMechanicId: r.assigned_mechanic_id,
         assignedMechanicEmail: r.assigned_mechanic_email,
