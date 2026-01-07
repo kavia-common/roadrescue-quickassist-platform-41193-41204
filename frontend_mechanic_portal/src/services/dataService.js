@@ -331,18 +331,31 @@ export const dataService = {
        *
        * This query shape assumes a relationship exists in Supabase:
        * assignments.request_id -> requests.id
+       *
+       * NOTE: Explicitly project request vehicle fields to avoid schema variations where
+       * `requests.vehicle` JSON is not selected/returned by default in joins.
        */
       const { data, error } = await supabase
         .from("assignments")
-        .select("id, mechanic_id, request_id, request:requests(*)")
+        .select(
+          [
+            "id",
+            "mechanic_id",
+            "request_id",
+            "request:requests(",
+            "id, created_at, user_id, user_email, issue_description, status, assigned_mechanic_id, assigned_mechanic_email, notes,",
+            "vehicle, vehicle_make, vehicle_model, vehicle_year, vehicle_plate,",
+            "make, model, year, plate,",
+            "contact, contact_name, contact_phone, contact_email",
+            ")",
+          ].join("")
+        )
         .eq("mechanic_id", effectiveMechanicId)
         // Prefer deterministic ordering without relying on optional columns.
         .order("request_id", { ascending: false });
 
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load assignments."));
 
-      // Normalize to the same row shape used by the existing rendering code (requests-like rows).
-      // Some schemas may expose the join under `request` (aliased) or `requests` depending on relationship config.
       return (data || [])
         .map((a) => a?.request || a?.requests)
         .filter(Boolean)
@@ -377,12 +390,18 @@ export const dataService = {
     if (supabase) {
       const authedUser = await requireSupabaseUser(supabase);
 
-      // Idempotency strategy:
-      // 1) Upsert into assignments on unique key (request_id) so repeated clicks do not duplicate.
-      // 2) Also update requests row to reflect assigned mechanic + status transition.
-      //
-      // NOTE: This assumes `assignments.request_id` is UNIQUE (recommended).
-      // If it's not unique, Supabase will error, which we surface in a friendly way.
+      /**
+       * Some deployments do not have a UNIQUE constraint that matches common upsert conflict targets
+       * (e.g. request_id, or (request_id, mechanic_id)). Using upsert with an invalid ON CONFLICT
+       * target triggers:
+       *   "there is no unique or exclusion constraint matching the ON CONFLICT specification"
+       *
+       * To stay schema-agnostic without requiring migrations, we use:
+       * 1) SELECT for an existing assignment row for (request_id, mechanic_id)
+       * 2) UPDATE by id if found, otherwise INSERT
+       *
+       * This preserves idempotency for repeated accepts by the same mechanic.
+       */
       const mechanicId = authedUser.id;
       const mechanicEmail = authedUser.email || mechanic.email;
 
@@ -395,20 +414,40 @@ export const dataService = {
         throw new Error("This request was already assigned to another mechanic.");
       }
 
-      // 1) Upsert assignment row (idempotent)
-      // Do NOT write assignments.accepted_at because it may not exist in the deployed schema.
-      const { error: upsertErr } = await supabase
+      // 1) Ensure an assignment exists (idempotent, without ON CONFLICT)
+      const { data: existingAssignment, error: findErr } = await supabase
         .from("assignments")
-        .upsert(
-          {
+        .select("id")
+        .eq("request_id", requestId)
+        .eq("mechanic_id", mechanicId)
+        .maybeSingle();
+
+      if (findErr) {
+        throw new Error(friendlySupabaseErrorMessage(findErr, "Could not accept this request."));
+      }
+
+      if (existingAssignment?.id) {
+        const { error: updateAssignErr } = await supabase
+          .from("assignments")
+          .update({
+            // Keep values consistent; do NOT write accepted_at (may not exist).
             mechanic_id: mechanicId,
             request_id: requestId,
-          },
-          { onConflict: "request_id" }
-        );
+          })
+          .eq("id", existingAssignment.id);
 
-      if (upsertErr) {
-        throw new Error(friendlySupabaseErrorMessage(upsertErr, "Could not accept this request."));
+        if (updateAssignErr) {
+          throw new Error(friendlySupabaseErrorMessage(updateAssignErr, "Could not accept this request."));
+        }
+      } else {
+        const { error: insertAssignErr } = await supabase.from("assignments").insert({
+          mechanic_id: mechanicId,
+          request_id: requestId,
+        });
+
+        if (insertAssignErr) {
+          throw new Error(friendlySupabaseErrorMessage(insertAssignErr, "Could not accept this request."));
+        }
       }
 
       // 2) Update request row (status transition + linking fields)
