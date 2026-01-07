@@ -4,17 +4,10 @@ import { Card } from "../components/ui/Card";
 import { Table } from "../components/ui/Table";
 import { Button } from "../components/ui/Button";
 import { dataService } from "../services/dataService";
+import { statusBadgeClass, statusLabel } from "../services/statusUtils";
 
 function statusBadge(status) {
-  const map = {
-    Submitted: "badge badge-blue",
-    "In Review": "badge badge-amber",
-    Accepted: "badge badge-blue",
-    "En Route": "badge badge-amber",
-    Working: "badge badge-amber",
-    Completed: "badge badge-green",
-  };
-  return <span className={map[status] || "badge"}>{status}</span>;
+  return <span className={statusBadgeClass(status)}>{statusLabel(status)}</span>;
 }
 
 function renderVehicleCell(vehicle) {
@@ -48,7 +41,13 @@ export function DashboardPage({ user }) {
   const accept = async (id) => {
     setBusyId(id);
     try {
+      // acceptRequest returns updated request (Supabase + mock) for instant UI feedback
       await dataService.acceptRequest({ requestId: id, mechanic: user });
+
+      // Optimistic local refresh: remove from "Available" list immediately.
+      setRows((prev) => prev.filter((r) => r.id !== id));
+
+      // Then reload for canonical truth (handles race/other accepts).
       await load();
     } catch (e) {
       setError(e.message || "Could not accept request.");

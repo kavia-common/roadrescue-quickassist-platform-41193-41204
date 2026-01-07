@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { normalizeStatus } from "./statusUtils";
 
 const LS_KEYS = {
   session: "rrqa.session",
@@ -234,7 +235,8 @@ function normalizeRequestRow(r) {
     vehicle: normalizeVehicle(r),
     issueDescription: r.issue_description ?? r.issueDescription ?? "",
     contact: normalizeContact(r),
-    status: r.status ?? "",
+    // IMPORTANT: keep status canonical across apps
+    status: normalizeStatus(r.status ?? ""),
     assignedMechanicId: r.assigned_mechanic_id ?? r.assignedMechanicId ?? null,
     assignedMechanicEmail: r.assigned_mechanic_email ?? r.assignedMechanicEmail ?? null,
     notes: r.notes || [],
@@ -472,16 +474,13 @@ export const dataService = {
       const authedUser = await requireSupabaseUser(supabase);
 
       /**
-       * Some deployments do not have a UNIQUE constraint that matches common upsert conflict targets
-       * (e.g. request_id, or (request_id, mechanic_id)). Using upsert with an invalid ON CONFLICT
-       * target triggers:
-       *   "there is no unique or exclusion constraint matching the ON CONFLICT specification"
+       * Some deployments do not have a UNIQUE constraint that matches common upsert conflict targets.
+       * To remain schema-agnostic, we do a SELECT then UPDATE/INSERT for assignments.
        *
-       * To stay schema-agnostic without requiring migrations, we use:
-       * 1) SELECT for an existing assignment row for (request_id, mechanic_id)
-       * 2) UPDATE by id if found, otherwise INSERT
-       *
-       * This preserves idempotency for repeated accepts by the same mechanic.
+       * Cross-app requirement:
+       * - Supabase is the source of truth.
+       * - On accept, write a professional canonical status to requests.status.
+       *   We standardize on: ASSIGNED
        */
       const mechanicId = authedUser.id;
       const mechanicEmail = authedUser.email || mechanic.email;
@@ -511,7 +510,6 @@ export const dataService = {
         const { error: updateAssignErr } = await supabase
           .from("assignments")
           .update({
-            // Keep values consistent; do NOT write accepted_at (may not exist).
             mechanic_id: mechanicId,
             request_id: requestId,
           })
@@ -532,24 +530,27 @@ export const dataService = {
       }
 
       // 2) Update request row (status transition + linking fields)
-      const { error: reqErr } = await supabase
+      const { data: updated, error: reqErr } = await supabase
         .from("requests")
         .update({
           assigned_mechanic_id: mechanicId,
           assigned_mechanic_email: mechanicEmail,
-          status: "assigned", // prefer DB-friendly status transition; UI still supports showing any status string
+          status: "ASSIGNED",
           notes: [...(existing?.notes || []), note],
         })
-        .eq("id", requestId);
+        .eq("id", requestId)
+        .select("*")
+        .maybeSingle();
 
       if (reqErr) {
         throw new Error(friendlySupabaseErrorMessage(reqErr, "Accepted assignment but failed to update request status."));
       }
 
-      return true;
+      // Return updated request so caller can refresh UI immediately without re-querying if desired
+      return updated ? normalizeRequestRow(updated) : true;
     }
 
-    // Mock mode behavior intact
+    // Mock mode behavior intact (also standardize to canonical)
     const all = getLocalRequests();
     const idx = all.findIndex((r) => r.id === requestId);
     if (idx < 0) throw new Error("Request not found.");
@@ -559,22 +560,31 @@ export const dataService = {
       ...r,
       assignedMechanicId: mechanic.id,
       assignedMechanicEmail: mechanic.email,
-      status: "Accepted",
+      status: "ASSIGNED",
       notes: [...(r.notes || []), note],
     };
     setLocalRequests(all);
-    return true;
+    return all[idx];
   },
 
   // PUBLIC_INTERFACE
   async updateRequestStatus({ requestId, status, mechanic, noteText }) {
     ensureSeedData();
-    const note = { id: uid("n"), at: new Date().toISOString(), by: mechanic.email, text: noteText || `Status changed to ${status}.` };
+    const canonical = normalizeStatus(status);
+    const note = {
+      id: uid("n"),
+      at: new Date().toISOString(),
+      by: mechanic.email,
+      text: noteText || `Status changed to ${canonical}.`,
+    };
 
     const supabase = getSupabase();
     if (supabase) {
       const existing = await this.getRequestById(requestId);
-      const { error } = await supabase.from("requests").update({ status, notes: [...(existing?.notes || []), note] }).eq("id", requestId);
+      const { error } = await supabase
+        .from("requests")
+        .update({ status: canonical, notes: [...(existing?.notes || []), note] })
+        .eq("id", requestId);
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not update status."));
       return true;
     }
@@ -582,7 +592,7 @@ export const dataService = {
     const all = getLocalRequests();
     const idx = all.findIndex((r) => r.id === requestId);
     if (idx < 0) throw new Error("Request not found.");
-    all[idx] = { ...all[idx], status, notes: [...(all[idx].notes || []), note] };
+    all[idx] = { ...all[idx], status: canonical, notes: [...(all[idx].notes || []), note] };
     setLocalRequests(all);
     return true;
   },

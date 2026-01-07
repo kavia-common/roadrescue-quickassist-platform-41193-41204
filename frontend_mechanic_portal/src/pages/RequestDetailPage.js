@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { dataService } from "../services/dataService";
+import { statusLabel } from "../services/statusUtils";
 
 // PUBLIC_INTERFACE
 export function RequestDetailPage({ user }) {
@@ -13,7 +14,8 @@ export function RequestDetailPage({ user }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const allowedStatuses = useMemo(() => ["Accepted", "En Route", "Working", "Completed"], []);
+  // Canonical statuses (shared across apps)
+  const allowedStatuses = useMemo(() => ["ASSIGNED", "EN_ROUTE", "WORKING", "COMPLETED"], []);
 
   const load = async () => {
     setError("");
@@ -63,7 +65,9 @@ export function RequestDetailPage({ user }) {
     <div className="container">
       <div className="hero">
         <h1 className="h1">Request {req.id.slice(0, 8)}</h1>
-        <p className="lead">Current status: <strong>{req.status}</strong></p>
+        <p className="lead">
+          Current status: <strong>{statusLabel(req.status)}</strong>
+        </p>
       </div>
 
       <div className="grid2">
@@ -121,8 +125,13 @@ export function RequestDetailPage({ user }) {
         <div className="row">
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             {allowedStatuses.map((s) => (
-              <Button key={s} variant={s === "Completed" ? "secondary" : "primary"} onClick={() => setStatus(s)} disabled={busy}>
-                Set: {s}
+              <Button
+                key={s}
+                variant={s === "COMPLETED" ? "secondary" : "primary"}
+                onClick={() => setStatus(s)}
+                disabled={busy}
+              >
+                Set: {statusLabel(s)}
               </Button>
             ))}
           </div>
