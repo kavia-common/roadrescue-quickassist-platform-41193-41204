@@ -332,24 +332,22 @@ export const dataService = {
        * This query shape assumes a relationship exists in Supabase:
        * assignments.request_id -> requests.id
        *
-       * NOTE: Explicitly project request vehicle fields to avoid schema variations where
-       * `requests.vehicle` JSON is not selected/returned by default in joins.
+       * IMPORTANT (schema variance):
+       * Different deployments store vehicle data differently:
+       *  - requests.vehicle (JSONB)
+       *  - or flat columns (vehicle_make/vehicle_model/...)
+       *  - or make/model/year/plate columns
+       *
+       * Selecting columns that don't exist causes hard SQL errors like:
+       *   "column requests_1.vehicle_plate does not exist"
+       *
+       * Therefore, we only select the joined request row as `*` and normalize vehicle/contact
+       * in JS via normalizeRequestRow(). If `vehicle` exists as JSON, it'll be included; if not,
+       * normalizeVehicle() will gracefully fall back to whatever flat fields are present.
        */
       const { data, error } = await supabase
         .from("assignments")
-        .select(
-          [
-            "id",
-            "mechanic_id",
-            "request_id",
-            "request:requests(",
-            "id, created_at, user_id, user_email, issue_description, status, assigned_mechanic_id, assigned_mechanic_email, notes,",
-            "vehicle, vehicle_make, vehicle_model, vehicle_year, vehicle_plate,",
-            "make, model, year, plate,",
-            "contact, contact_name, contact_phone, contact_email",
-            ")",
-          ].join("")
-        )
+        .select("id, mechanic_id, request_id, request:requests(*)")
         .eq("mechanic_id", effectiveMechanicId)
         // Prefer deterministic ordering without relying on optional columns.
         .order("request_id", { ascending: false });
