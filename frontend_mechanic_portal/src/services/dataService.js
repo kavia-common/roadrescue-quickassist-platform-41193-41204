@@ -49,6 +49,10 @@ function ensureSeedData() {
       vehicle: { make: "Toyota", model: "Corolla", year: "2016", plate: "ABC-123" },
       issueDescription: "Car won't start, clicking noise.",
       contact: { name: "Sam Driver", phone: "555-0101" },
+      // Location fields (mock mode seed example)
+      address: "1 Market St, San Francisco, CA",
+      lat: 37.7946,
+      lon: -122.395,
       status: "Submitted",
       assignedMechanicId: null,
       assignedMechanicEmail: null,
@@ -227,6 +231,48 @@ function normalizeContact(raw) {
 }
 
 function normalizeRequestRow(r) {
+  const safeObj = (x) => (x && typeof x === "object" ? x : null);
+
+  /**
+   * Location data can be stored as:
+   * - flat columns: address, lat, lon
+   * - flat columns: latitude, longitude
+   * - nested JSON: location { address, lat, lon } (or similar)
+   *
+   * We keep this extraction defensive to support schema variance.
+   */
+  const locationCandidate =
+    safeObj(r?.location) ||
+    safeObj(r?.breakdown_location) ||
+    safeObj(r?.breakdownLocation) ||
+    safeObj(r?.meta?.location) ||
+    safeObj(r?.metadata?.location);
+
+  const address =
+    r.address ??
+    r.breakdown_address ??
+    r.breakdownAddress ??
+    locationCandidate?.address ??
+    locationCandidate?.displayName ??
+    "";
+
+  const lat =
+    r.lat ??
+    r.latitude ??
+    locationCandidate?.lat ??
+    locationCandidate?.latitude ??
+    null;
+
+  const lon =
+    r.lon ??
+    r.lng ??
+    r.long ??
+    r.longitude ??
+    locationCandidate?.lon ??
+    locationCandidate?.lng ??
+    locationCandidate?.longitude ??
+    null;
+
   return {
     id: r.id,
     createdAt: r.created_at ?? r.createdAt ?? "",
@@ -235,6 +281,12 @@ function normalizeRequestRow(r) {
     vehicle: normalizeVehicle(r),
     issueDescription: r.issue_description ?? r.issueDescription ?? "",
     contact: normalizeContact(r),
+
+    // Location fields (used by mechanic Request Detail map view)
+    address: typeof address === "string" ? address : String(address || ""),
+    lat,
+    lon,
+
     // IMPORTANT: keep status canonical across apps
     status: normalizeStatus(r.status ?? ""),
     assignedMechanicId: r.assigned_mechanic_id ?? r.assignedMechanicId ?? null,

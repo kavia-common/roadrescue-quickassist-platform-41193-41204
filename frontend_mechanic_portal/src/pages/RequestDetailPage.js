@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
+import { LocationMap } from "../components/maps/LocationMap";
 import { dataService } from "../services/dataService";
 import { statusLabel } from "../services/statusUtils";
 
@@ -114,6 +115,31 @@ export function RequestDetailPage({ user }) {
           </div>
         </Card>
       </div>
+
+      <Card title="Location" subtitle="Stored address and coordinates from the customer request.">
+        <div className="kv" style={{ marginBottom: 12 }}>
+          <div>
+            <span className="k">Address</span>
+            <span className="v" style={{ textAlign: "right" }}>{req.address || "—"}</span>
+          </div>
+          <div>
+            <span className="k">Latitude</span>
+            <span className="v">{req.lat ?? "—"}</span>
+          </div>
+          <div>
+            <span className="k">Longitude</span>
+            <span className="v">{req.lon ?? "—"}</span>
+          </div>
+        </div>
+
+        {req.lat != null && req.lon != null ? (
+          <LocationMap lat={req.lat} lon={req.lon} />
+        ) : (
+          <div className="alert alert-info">
+            No coordinates were saved for this request.
+          </div>
+        )}
+      </Card>
 
       <Card title="Issue">
         <p style={{ marginTop: 0 }}>{req.issueDescription}</p>
