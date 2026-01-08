@@ -273,13 +273,29 @@ function normalizeRequestRow(r) {
     locationCandidate?.longitude ??
     null;
 
+  // Normalize issue description for both naming conventions.
+  const issueDescription = r.issue_description ?? r.issueDescription ?? "";
+
+  // Normalize notes into an array at the data layer so all UI consumers are safe.
+  const notesRaw = r?.notes;
+  const notes = Array.isArray(notesRaw)
+    ? notesRaw
+    : typeof notesRaw === "string" && notesRaw.trim()
+      ? [{ id: "note_legacy_string", at: new Date().toISOString(), by: "System", text: notesRaw.trim() }]
+      : [];
+
   return {
     id: r.id,
     createdAt: r.created_at ?? r.createdAt ?? "",
     userId: r.user_id ?? r.userId ?? "",
     userEmail: r.user_email ?? r.userEmail ?? "",
     vehicle: normalizeVehicle(r),
-    issueDescription: r.issue_description ?? r.issueDescription ?? "",
+
+    // Canonical UI field:
+    issueDescription,
+    // Alias to support list renderers and any legacy code expecting DB naming:
+    issue_description: issueDescription,
+
     contact: normalizeContact(r),
 
     // Location fields (used by mechanic Request Detail map view)
@@ -291,7 +307,7 @@ function normalizeRequestRow(r) {
     status: normalizeStatus(r.status ?? ""),
     assignedMechanicId: r.assigned_mechanic_id ?? r.assignedMechanicId ?? null,
     assignedMechanicEmail: r.assigned_mechanic_email ?? r.assignedMechanicEmail ?? null,
-    notes: r.notes || [],
+    notes,
   };
 }
 

@@ -80,6 +80,11 @@ export function DashboardPage({ user }) {
               header: "Vehicle",
               render: (r) => renderVehicleCell(r.vehicle),
             },
+            {
+              key: "issue_description",
+              header: "Issue",
+              render: (r) => r.issue_description || r.issueDescription || "—",
+            },
             { key: "status", header: "Status", render: (r) => statusBadge(r.status) },
             {
               key: "action",
