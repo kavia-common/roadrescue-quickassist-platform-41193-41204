@@ -6,6 +6,25 @@ import { LocationMap } from "../components/maps/LocationMap";
 import { dataService } from "../services/dataService";
 import { statusLabel } from "../services/statusUtils";
 
+function normalizeNotes(notes) {
+  /**
+   * Normalize request notes into an array to avoid runtime errors when rendering.
+   *
+   * Expected shape is an array of note objects:
+   *   [{ id, at, by, text }, ...]
+   *
+   * Defensive rules:
+   * - Array => use as-is
+   * - String => coerce into a single-item array with best-effort fields
+   * - null/undefined/other => treat as no notes
+   */
+  if (Array.isArray(notes)) return notes;
+  if (typeof notes === "string" && notes.trim()) {
+    return [{ id: "note_legacy_string", at: new Date().toISOString(), by: "System", text: notes.trim() }];
+  }
+  return [];
+}
+
 // PUBLIC_INTERFACE
 export function RequestDetailPage({ user }) {
   /** Mechanic request detail & status controls. */
@@ -61,6 +80,8 @@ export function RequestDetailPage({ user }) {
     );
   }
   if (!req) return <div className="container"><div className="skeleton">Loading…</div></div>;
+
+  const normalizedNotes = normalizeNotes(req?.notes);
 
   return (
     <div className="container">
@@ -164,16 +185,18 @@ export function RequestDetailPage({ user }) {
           <Link className="link" to="/assignments">← Back to assignments</Link>
         </div>
 
-        {req.notes?.length ? (
+        {normalizedNotes.length ? (
           <>
             <div className="divider" />
             <div>
               <div className="label">History</div>
               <ul style={{ margin: "8px 0 0", paddingLeft: 18, color: "var(--text)" }}>
-                {req.notes.slice().reverse().map((n) => (
-                  <li key={n.id} style={{ margin: "8px 0" }}>
-                    <span style={{ color: "var(--muted)", fontWeight: 800 }}>{new Date(n.at).toLocaleString()} • {n.by}:</span>{" "}
-                    <span style={{ fontWeight: 700 }}>{n.text}</span>
+                {normalizedNotes.slice().reverse().map((n, idx) => (
+                  <li key={n?.id || `note_${idx}`} style={{ margin: "8px 0" }}>
+                    <span style={{ color: "var(--muted)", fontWeight: 800 }}>
+                      {n?.at ? new Date(n.at).toLocaleString() : "—"} • {n?.by || "—"}:
+                    </span>{" "}
+                    <span style={{ fontWeight: 700 }}>{n?.text || ""}</span>
                   </li>
                 ))}
               </ul>
