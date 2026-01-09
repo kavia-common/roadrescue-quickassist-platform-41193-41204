@@ -269,6 +269,133 @@ async function requireSupabaseUser(supabase) {
   return user;
 }
 
+/**
+ * Atomic lifecycle update helpers (Supabase mode).
+ *
+ * These methods aim to be:
+ * - Atomic at the row level (single update statement with preconditions)
+ * - Consistent about timestamps (client-side ISO; DB may also have triggers)
+ * - Compatible with schema variants used across environments (new: mechanic_id; legacy: assigned_mechanic_id)
+ *
+ * NOTE: We intentionally avoid raw SQL/rpc usage; everything is via supabase-js update filters.
+ */
+
+/**
+ * Attempts an atomic accept (open -> assigned) using the newer schema columns first.
+ * Falls back to legacy assigned_mechanic_* columns when needed.
+ */
+async function supaAtomicAcceptRequest(supabase, { requestId, mechanicId, assignedAtIso }) {
+  // Newer schema: mechanic_id + assigned_at + status=assigned; guard on mechanic_id IS NULL.
+  const preferred = {
+    mechanic_id: mechanicId,
+    status: "assigned",
+    assigned_at: assignedAtIso,
+  };
+
+  const { data: row1, error: err1 } = await supabase
+    .from("requests")
+    .update(preferred)
+    .eq("id", requestId)
+    .is("mechanic_id", null)
+    .select("*")
+    .maybeSingle();
+
+  if (!err1) {
+    // If row1 is null, the guard prevented update (someone else assigned already).
+    return { updated: Boolean(row1), row: row1, used: "preferred" };
+  }
+
+  if (!isMissingColumnError(err1)) {
+    throw new Error(friendlySupabaseErrorMessage(err1, "Could not accept this request."));
+  }
+
+  // Legacy schema: assigned_mechanic_id + assigned_at + status=ASSIGNED; guard on assigned_mechanic_id IS NULL.
+  const legacy = {
+    assigned_mechanic_id: mechanicId,
+    status: "ASSIGNED",
+    assigned_at: assignedAtIso,
+  };
+
+  const { data: row2, error: err2 } = await supabase
+    .from("requests")
+    .update(legacy)
+    .eq("id", requestId)
+    .is("assigned_mechanic_id", null)
+    .select("*")
+    .maybeSingle();
+
+  if (err2) throw new Error(friendlySupabaseErrorMessage(err2, "Could not accept this request."));
+  return { updated: Boolean(row2), row: row2, used: "legacy" };
+}
+
+/**
+ * Attempts an atomic start (assigned -> in_progress) for the newer schema first.
+ * Falls back to legacy status-only update when needed.
+ */
+async function supaAtomicStartRequest(supabase, { requestId, mechanicId }) {
+  // Newer schema: status=in_progress and only allow the assigned mechanic to start.
+  const { data: row1, error: err1 } = await supabase
+    .from("requests")
+    .update({ status: "in_progress" })
+    .eq("id", requestId)
+    .eq("mechanic_id", mechanicId)
+    .eq("status", "assigned")
+    .select("*")
+    .maybeSingle();
+
+  if (!err1) return { updated: Boolean(row1), row: row1, used: "preferred" };
+
+  if (!isMissingColumnError(err1)) {
+    throw new Error(friendlySupabaseErrorMessage(err1, "Could not start request."));
+  }
+
+  // Legacy schema: set status to WORKING; cannot enforce previous status due to variant values.
+  const { data: row2, error: err2 } = await supabase
+    .from("requests")
+    .update({ status: "WORKING" })
+    .eq("id", requestId)
+    .eq("assigned_mechanic_id", mechanicId)
+    .select("*")
+    .maybeSingle();
+
+  if (err2) throw new Error(friendlySupabaseErrorMessage(err2, "Could not start request."));
+  return { updated: Boolean(row2), row: row2, used: "legacy" };
+}
+
+/**
+ * Attempts an atomic complete (in_progress -> completed) with completed_at.
+ * Falls back to legacy status-only update when needed.
+ */
+async function supaAtomicCompleteRequest(supabase, { requestId, mechanicId, completedAtIso }) {
+  // Newer schema: status=completed, set completed_at, and enforce prior status=in_progress.
+  const { data: row1, error: err1 } = await supabase
+    .from("requests")
+    .update({ status: "completed", completed_at: completedAtIso })
+    .eq("id", requestId)
+    .eq("mechanic_id", mechanicId)
+    .eq("status", "in_progress")
+    .select("*")
+    .maybeSingle();
+
+  if (!err1) return { updated: Boolean(row1), row: row1, used: "preferred" };
+
+  if (!isMissingColumnError(err1)) {
+    throw new Error(friendlySupabaseErrorMessage(err1, "Could not complete request."));
+  }
+
+  // Legacy schema: status=COMPLETED, attempt completed_at (may or may not exist).
+  const { data: row2, error: err2 } = await supabase
+    .from("requests")
+    .update({ status: "COMPLETED", completed_at: completedAtIso })
+    .eq("id", requestId)
+    .eq("assigned_mechanic_id", mechanicId)
+    .select("*")
+    .maybeSingle();
+
+  if (err2) throw new Error(friendlySupabaseErrorMessage(err2, "Could not complete request."));
+  return { updated: Boolean(row2), row: row2, used: "legacy" };
+}
+
 /** Extract a friendlier UI message from a supabase-js error (best-effort). */
 function friendlySupabaseErrorMessage(err, fallback) {
   const msg = err?.message || "";
@@ -570,12 +697,12 @@ export const dataService = {
     /**
      * Accepting an open request assigns it to current mechanic.
      *
-     * Attachment expected automation:
-     * - set mechanic_id
-     * - status = 'assigned'
+     * Atomic requirements:
+     * - set mechanic_id (or legacy assigned_mechanic_id)
+     * - status: open -> assigned
      * - set assigned_at
      *
-     * RLS: block mechanic actions unless approved=true (enforced by DB policies).
+     * We implement this with a single guarded update statement in Supabase mode.
      */
     ensureSeedData();
 
@@ -585,51 +712,29 @@ export const dataService = {
       const mechanicId = authedUser.id;
       const mechanicEmail = authedUser.email || mechanic.email;
 
-      const existing = await this.getRequestById(requestId);
-      if (!existing) throw new Error("Request not found.");
-
-      if (existing.assignedMechanicId && existing.assignedMechanicId !== mechanicId) {
-        throw new Error("This request was already assigned to another mechanic.");
-      }
-
       const assignedAt = new Date().toISOString();
 
-      // Try updating the attachment schema first: mechanic_id / assigned_at / status='assigned'
-      // If those columns don't exist, fall back to legacy assigned_mechanic_* and status='ASSIGNED'.
-      const updatePayloadPreferred = {
-        mechanic_id: mechanicId,
-        status: "assigned",
-        assigned_at: assignedAt,
-      };
+      const { updated } = await supaAtomicAcceptRequest(supabase, {
+        requestId,
+        mechanicId,
+        assignedAtIso: assignedAt,
+      });
 
-      let updatedRow = null;
-      const { data: updated1, error: err1 } = await supabase.from("requests").update(updatePayloadPreferred).eq("id", requestId).select("*").maybeSingle();
-
-      if (!err1) {
-        updatedRow = updated1;
-      } else if (isMissingColumnError(err1)) {
-        const updatePayloadLegacy = {
-          assigned_mechanic_id: mechanicId,
-          assigned_mechanic_email: mechanicEmail,
-          status: "ASSIGNED",
-          // some schemas may still have assigned_at; try but do not assume.
-          assigned_at: assignedAt,
-        };
-
-        const { data: updated2, error: err2 } = await supabase.from("requests").update(updatePayloadLegacy).eq("id", requestId).select("*").maybeSingle();
-        if (err2) throw new Error(friendlySupabaseErrorMessage(err2, "Could not accept this request."));
-        updatedRow = updated2;
-      } else {
-        throw new Error(friendlySupabaseErrorMessage(err1, "Could not accept this request."));
+      if (!updated) {
+        // Either already assigned, or request doesn't exist, or status isn't open in the newer schema.
+        // Provide a user-friendly message; caller will refresh list.
+        throw new Error("This request was already accepted by someone else.");
       }
 
       // Add a service note. Prefer request_notes; fall back to embedding in requests.notes.
       const noteText = "Accepted request.";
       const noteAt = new Date().toISOString();
 
+      // We need the current notes for fallback embedding.
+      const existing = await this.getRequestById(requestId);
+
       const inserted = await insertRequestNote(supabase, { requestId, authorRole: "mechanic", noteText });
       if (!inserted.supported) {
-        // Fallback: append to json notes field (if present).
         try {
           const safeExistingNotes = Array.isArray(existing?.notes) ? existing.notes : [];
           const fallbackNote = { id: uid("n"), at: noteAt, by: mechanicEmail || "mechanic", text: noteText };
@@ -644,7 +749,7 @@ export const dataService = {
         }
       }
 
-      return updatedRow ? await this.getRequestById(requestId) : true;
+      return await this.getRequestById(requestId);
     }
 
     // Mock mode
@@ -670,8 +775,9 @@ export const dataService = {
   async updateRequestStatus({ requestId, status, mechanic, noteText }) {
     /**
      * Status updates for assigned requests.
+     *
      * Attachment flow: assigned -> in_progress -> completed
-     * UI currently uses EN_ROUTE/WORKING/COMPLETED; we map those to in_progress/completed.
+     * UI currently uses ASSIGNED/WORKING/COMPLETED; we map those onto start/complete transitions.
      */
     ensureSeedData();
     const canonical = normalizeStatus(status);
@@ -680,19 +786,6 @@ export const dataService = {
     if (supabase) {
       const authedUser = await requireSupabaseUser(supabase);
       const mechanicId = authedUser.id;
-
-      // Map canonical UI tokens to attachment schema statuses:
-      // - ASSIGNED -> assigned
-      // - EN_ROUTE/WORKING -> in_progress
-      // - COMPLETED -> completed
-      const mapped =
-        canonical === "COMPLETED"
-          ? "completed"
-          : canonical === "ASSIGNED"
-            ? "assigned"
-            : canonical === "OPEN"
-              ? "open"
-              : "in_progress";
 
       const existing = await this.getRequestById(requestId);
       if (!existing) throw new Error("Request not found.");
@@ -706,30 +799,39 @@ export const dataService = {
         throw new Error("You can only update requests assigned to you.");
       }
 
-      const completedAt = mapped === "completed" ? new Date().toISOString() : null;
-
-      // Prefer attachment schema update
-      const preferredPayload = completedAt
-        ? { status: mapped, completed_at: completedAt }
-        : { status: mapped };
-
-      const { error: err1 } = await supabase.from("requests").update(preferredPayload).eq("id", requestId);
-
-      if (err1) {
-        if (isMissingColumnError(err1)) {
-          // Fall back to legacy schema: status tokens are stored uppercase and no completed_at.
-          const { error: err2 } = await supabase.from("requests").update({ status: canonical }).eq("id", requestId);
-          if (err2) throw new Error(friendlySupabaseErrorMessage(err2, "Could not update status."));
-        } else {
-          throw new Error(friendlySupabaseErrorMessage(err1, "Could not update status."));
+      /**
+       * We treat transitions as:
+       * - WORKING (or EN_ROUTE) => start (assigned -> in_progress)
+       * - COMPLETED => complete (in_progress -> completed, completed_at set)
+       * - ASSIGNED => no-op or keep assigned (but allow status write for compatibility)
+       */
+      if (canonical === "COMPLETED") {
+        await supaAtomicCompleteRequest(supabase, {
+          requestId,
+          mechanicId,
+          completedAtIso: new Date().toISOString(),
+        });
+      } else if (canonical === "WORKING" || canonical === "EN_ROUTE") {
+        await supaAtomicStartRequest(supabase, { requestId, mechanicId });
+      } else if (canonical === "ASSIGNED") {
+        // Keep compatible: attempt to set assigned (no timestamps here; accept flow sets assigned_at).
+        const { error } = await supabase.from("requests").update({ status: "assigned" }).eq("id", requestId).eq("mechanic_id", mechanicId);
+        if (error && !isMissingColumnError(error)) {
+          throw new Error(friendlySupabaseErrorMessage(error, "Could not update status."));
         }
+        if (error && isMissingColumnError(error)) {
+          const { error: e2 } = await supabase.from("requests").update({ status: "ASSIGNED" }).eq("id", requestId).eq("assigned_mechanic_id", mechanicId);
+          if (e2) throw new Error(friendlySupabaseErrorMessage(e2, "Could not update status."));
+        }
+      } else {
+        // OPEN shouldn't happen for assigned mechanics; treat as in_progress for safety.
+        await supaAtomicStartRequest(supabase, { requestId, mechanicId });
       }
 
       // Add a note (request_notes preferred).
       const noteToWrite = (noteText || "").trim() || `Status changed to ${canonical}.`;
       const inserted = await insertRequestNote(supabase, { requestId, authorRole: "mechanic", noteText: noteToWrite });
       if (!inserted.supported) {
-        // Fallback to embedding JSON notes
         try {
           const safeExistingNotes = Array.isArray(existing?.notes) ? existing.notes : [];
           const fallbackNote = { id: uid("n"), at: new Date().toISOString(), by: authedUser.email || mechanic.email, text: noteToWrite };
