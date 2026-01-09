@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
@@ -17,7 +17,7 @@ export function RequestDetailPage({ user }) {
   // Canonical statuses (shared across apps)
   const allowedStatuses = useMemo(() => ["ASSIGNED", "EN_ROUTE", "WORKING", "COMPLETED"], []);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setError("");
     try {
       const r = await dataService.getRequestById(requestId);
@@ -26,11 +26,11 @@ export function RequestDetailPage({ user }) {
     } catch (e) {
       setError(e.message || "Could not load request.");
     }
-  };
+  }, [requestId]);
 
   useEffect(() => {
     load();
-  }, [requestId]);
+  }, [load]);
 
   const setStatus = async (status) => {
     setBusy(true);
