@@ -325,6 +325,60 @@ function normalizeRequestRow(r) {
   };
 }
 
+/**
+ * PUBLIC_INTERFACE
+ */
+export function normalizeRequest(req) {
+  /**
+   * Canonical request normalization layer for Mechanic Portal UI.
+   *
+   * Ensures the app can safely render requests from:
+   * - Supabase rows (snake_case columns, JSONB columns)
+   * - localStorage mock mode (camelCase fields)
+   * - joined shapes (e.g., assignments -> request:requests(*))
+   *
+   * Guarantees at minimum:
+   * - req.vehicle is an object {make, model, year, plate}
+   * - req.issueDescription is a string
+   * - req.notes is always an array (possibly empty)
+   * - req.status is canonicalized via normalizeStatus()
+   */
+  if (!req || typeof req !== "object") return null;
+
+  // If the record already looks normalized (our shape), still ensure notes is safe.
+  const alreadyNormalized =
+    typeof req.id === "string" &&
+    req.vehicle &&
+    typeof req.vehicle === "object" &&
+    typeof (req.issueDescription ?? req.issue_description) !== "undefined";
+
+  const base = alreadyNormalized ? req : normalizeRequestRow(req);
+
+  // Safety net: normalize notes again in case a caller passed through mock data.
+  const notesRaw = base?.notes;
+  const notes = Array.isArray(notesRaw)
+    ? notesRaw
+    : typeof notesRaw === "string" && notesRaw.trim()
+      ? [{ id: "note_legacy_string", at: new Date().toISOString(), by: "System", text: notesRaw.trim() }]
+      : [];
+
+  const issueDescription =
+    base?.issueDescription ??
+    base?.issue_description ??
+    base?.issue ??
+    base?.description ??
+    "";
+
+  return {
+    ...base,
+    vehicle: normalizeVehicle(base),
+    issueDescription: typeof issueDescription === "string" ? issueDescription : String(issueDescription || ""),
+    issue_description: typeof issueDescription === "string" ? issueDescription : String(issueDescription || ""),
+    notes,
+    status: normalizeStatus(base?.status ?? ""),
+  };
+}
+
 async function supaGetUserRole(supabase, userId, email) {
   try {
     const { data, error } = await supabase.from("profiles").select("role,approved,profile").eq("id", userId).maybeSingle();
@@ -410,7 +464,7 @@ export const dataService = {
     // In mock mode, assign a custom string ID.
     const all = getLocalRequests();
     setLocalRequests([request, ...all]);
-    return request;
+    return normalizeRequest(request);
   },
 
   // PUBLIC_INTERFACE
@@ -469,11 +523,14 @@ export const dataService = {
     if (supabase) {
       const { data, error } = await supabase.from("requests").select("*").is("assigned_mechanic_id", null).order("created_at", { ascending: false });
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load requests."));
-      return (data || []).map(normalizeRequestRow);
+      return (data || []).map((r) => normalizeRequest(r)).filter(Boolean);
     }
 
     const all = getLocalRequests();
-    return all.filter((r) => !r.assignedMechanicId && (r.status === "Submitted" || r.status === "In Review"));
+    return all
+      .filter((r) => !r.assignedMechanicId && (r.status === "Submitted" || r.status === "In Review"))
+      .map((r) => normalizeRequest(r))
+      .filter(Boolean);
   },
 
   // PUBLIC_INTERFACE
@@ -524,12 +581,16 @@ export const dataService = {
       return (data || [])
         .map((a) => a?.request || a?.requests)
         .filter(Boolean)
-        .map(normalizeRequestRow);
+        .map((r) => normalizeRequest(r))
+        .filter(Boolean);
     }
 
     // Mock mode: requests are the source of truth.
     const all = getLocalRequests();
-    return all.filter((r) => r.assignedMechanicId === mechanicId);
+    return all
+      .filter((r) => r.assignedMechanicId === mechanicId)
+      .map((r) => normalizeRequest(r))
+      .filter(Boolean);
   },
 
   // PUBLIC_INTERFACE
@@ -539,11 +600,12 @@ export const dataService = {
       const { data, error } = await supabase.from("requests").select("*").eq("id", requestId).maybeSingle();
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load request."));
       if (!data) return null;
-      return normalizeRequestRow(data);
+      return normalizeRequest(data);
     }
 
     const all = getLocalRequests();
-    return all.find((r) => r.id === requestId) || null;
+    const found = all.find((r) => r.id === requestId) || null;
+    return found ? normalizeRequest(found) : null;
   },
 
   // PUBLIC_INTERFACE
@@ -643,10 +705,10 @@ export const dataService = {
       assignedMechanicId: mechanic.id,
       assignedMechanicEmail: mechanic.email,
       status: "ASSIGNED",
-      notes: [...(r.notes || []), note],
+      notes: [...(Array.isArray(r.notes) ? r.notes : []), note],
     };
     setLocalRequests(all);
-    return all[idx];
+    return normalizeRequest(all[idx]);
   },
 
   // PUBLIC_INTERFACE
@@ -674,7 +736,8 @@ export const dataService = {
     const all = getLocalRequests();
     const idx = all.findIndex((r) => r.id === requestId);
     if (idx < 0) throw new Error("Request not found.");
-    all[idx] = { ...all[idx], status: canonical, notes: [...(all[idx].notes || []), note] };
+    const prevNotes = Array.isArray(all[idx].notes) ? all[idx].notes : [];
+    all[idx] = { ...all[idx], status: canonical, notes: [...prevNotes, note] };
     setLocalRequests(all);
     return true;
   },

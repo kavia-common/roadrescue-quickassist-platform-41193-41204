@@ -163,7 +163,7 @@ export function RequestDetailPage({ user }) {
       </Card>
 
       <Card title="Issue">
-        <p style={{ marginTop: 0 }}>{req.issueDescription}</p>
+        <p style={{ marginTop: 0 }}>{req.issueDescription || "—"}</p>
         <div className="divider" />
         <div className="field">
           <label className="label" htmlFor="note">Progress note (optional)</label>

@@ -24,7 +24,7 @@ function renderCreatedAtCell(createdAt) {
 }
 
 function renderIssueCell(r) {
-  return r?.issueDescription || r?.issue_description || r?.issue || r?.description || "—";
+  return r?.issueDescription || "—";
 }
 
 // PUBLIC_INTERFACE
