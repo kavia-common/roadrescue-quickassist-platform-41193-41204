@@ -29,6 +29,9 @@ export function Navbar({ user }) {
               <NavLink to="/assignments" className={({ isActive }) => (isActive ? "navlink active" : "navlink")}>
                 My Assignments
               </NavLink>
+              <NavLink to="/request" className={({ isActive }) => (isActive ? "navlink active" : "navlink")}>
+                Request Mechanic
+              </NavLink>
               <NavLink to="/profile" className={({ isActive }) => (isActive ? "navlink active" : "navlink")}>
                 Profile
               </NavLink>

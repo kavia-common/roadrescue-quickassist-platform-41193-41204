@@ -12,6 +12,7 @@ import { DashboardPage } from "./pages/DashboardPage";
 import { MyAssignmentsPage } from "./pages/MyAssignmentsPage";
 import { RequestDetailPage } from "./pages/RequestDetailPage";
 import { ProfilePage } from "./pages/ProfilePage";
+import { RequestMechanicPage } from "./pages/RequestMechanicPage";
 
 // PUBLIC_INTERFACE
 function App() {
@@ -73,6 +74,15 @@ function App() {
               element={
                 <RequireAuth user={user}>
                   <ProfilePage user={user} onUserUpdated={setUser} />
+                </RequireAuth>
+              }
+            />
+
+            <Route
+              path="/request"
+              element={
+                <RequireAuth user={user}>
+                  <RequestMechanicPage />
                 </RequireAuth>
               }
             />
