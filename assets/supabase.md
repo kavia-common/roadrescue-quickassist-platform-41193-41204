@@ -5,12 +5,15 @@ The mechanic portal can run in:
 - **Supabase mode** when `REACT_APP_SUPABASE_URL` and `REACT_APP_SUPABASE_KEY` are set
 - **Mock mode** otherwise (localStorage)
 
-See the user website `assets/supabase.md` for the implemented schema and RLS policies.
+See the user website `assets/supabase.md` for the implemented schema, triggers, indexes, and RLS policies.
 
-Mechanic-specific usage:
-- reads requests (RLS allows mechanics to select requests)
-- accepts a request (updates `assigned_mechanic_id`, `assigned_mechanic_email`, `status`)
-- updates request status and notes
-- updates mechanic profile via flat columns on `profiles`:
-  - `display_name` (text)
-  - `service_area` (text)
+Mechanic-specific usage (expected by RLS):
+
+- Mechanics have `app_metadata.role = mechanic`
+- Mechanics must also be approved in `public.profiles` (`role='mechanic'` and `approved=true`)
+- Approved mechanics can:
+  - view all requests
+  - accept an unassigned request by setting `assigned_mechanic_id` to their own `auth.uid()`
+  - update requests assigned to them
+  - add notes on requests assigned to them (stored in `request_notes`)
+  - manage their `mechanic_profiles` row (self-only)
