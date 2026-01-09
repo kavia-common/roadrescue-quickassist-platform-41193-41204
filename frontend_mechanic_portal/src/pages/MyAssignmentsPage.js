@@ -16,6 +16,10 @@ function renderVehicleCell(vehicle) {
   return label || "—";
 }
 
+function renderIssueCell(r) {
+  return r?.issueDescription || r?.issue_description || r?.issue || r?.description || "—";
+}
+
 // PUBLIC_INTERFACE
 export function MyAssignmentsPage({ user }) {
   /** Shows requests assigned to current mechanic. */
@@ -52,15 +56,15 @@ export function MyAssignmentsPage({ user }) {
             {
               key: "vehicle",
               header: "Vehicle",
-              render: (r) => renderVehicleCell(r.vehicle),
+              render: (r) => renderVehicleCell(r?.vehicle),
             },
             {
               key: "issue_description",
               header: "Issue",
-              render: (r) => r.issue_description || r.issueDescription || "—",
+              render: (r) => renderIssueCell(r),
             },
             { key: "status", header: "Status", render: (r) => statusBadge(r.status) },
-            { key: "userEmail", header: "Customer", render: (r) => r.userEmail },
+            { key: "userEmail", header: "Customer", render: (r) => r?.userEmail || "—" },
           ]}
           rows={rows}
           rowKey={(r) => r.id}

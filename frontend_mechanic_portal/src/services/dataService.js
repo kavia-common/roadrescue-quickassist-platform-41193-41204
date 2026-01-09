@@ -273,8 +273,19 @@ function normalizeRequestRow(r) {
     locationCandidate?.longitude ??
     null;
 
-  // Normalize issue description for both naming conventions.
-  const issueDescription = r.issue_description ?? r.issueDescription ?? "";
+  /**
+   * Normalize issue description from a variety of schema variants.
+   * Common possibilities across deployments:
+   * - issue_description (snake_case)
+   * - issueDescription (camelCase)
+   * - issue / description (generic)
+   */
+  const issueDescription =
+    r.issue_description ??
+    r.issueDescription ??
+    r.issue ??
+    r.description ??
+    "";
 
   // Normalize notes into an array at the data layer so all UI consumers are safe.
   const notesRaw = r?.notes;
@@ -284,17 +295,20 @@ function normalizeRequestRow(r) {
       ? [{ id: "note_legacy_string", at: new Date().toISOString(), by: "System", text: notesRaw.trim() }]
       : [];
 
+  // createdAt should be a usable ISO string; fall back safely.
+  const createdAt = r.created_at ?? r.createdAt ?? "";
+
   return {
     id: r.id,
-    createdAt: r.created_at ?? r.createdAt ?? "",
+    createdAt: typeof createdAt === "string" ? createdAt : createdAt ? String(createdAt) : "",
     userId: r.user_id ?? r.userId ?? "",
     userEmail: r.user_email ?? r.userEmail ?? "",
     vehicle: normalizeVehicle(r),
 
     // Canonical UI field:
-    issueDescription,
+    issueDescription: typeof issueDescription === "string" ? issueDescription : String(issueDescription || ""),
     // Alias to support list renderers and any legacy code expecting DB naming:
-    issue_description: issueDescription,
+    issue_description: typeof issueDescription === "string" ? issueDescription : String(issueDescription || ""),
 
     contact: normalizeContact(r),
 

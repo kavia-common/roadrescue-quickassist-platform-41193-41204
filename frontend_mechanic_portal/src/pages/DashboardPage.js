@@ -17,6 +17,16 @@ function renderVehicleCell(vehicle) {
   return label || "—";
 }
 
+function renderCreatedAtCell(createdAt) {
+  const d = createdAt ? new Date(createdAt) : null;
+  if (!d || Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString();
+}
+
+function renderIssueCell(r) {
+  return r?.issueDescription || r?.issue_description || r?.issue || r?.description || "—";
+}
+
 // PUBLIC_INTERFACE
 export function DashboardPage({ user }) {
   /** Shows available requests; mechanics can accept them. */
@@ -74,16 +84,16 @@ export function DashboardPage({ user }) {
         <Table
           columns={[
             { key: "id", header: "Request", render: (r) => <Link className="link" to={`/requests/${r.id}`}>{r.id.slice(0, 8)}</Link> },
-            { key: "createdAt", header: "Created", render: (r) => new Date(r.createdAt).toLocaleString() },
+            { key: "createdAt", header: "Created", render: (r) => renderCreatedAtCell(r?.createdAt) },
             {
               key: "vehicle",
               header: "Vehicle",
-              render: (r) => renderVehicleCell(r.vehicle),
+              render: (r) => renderVehicleCell(r?.vehicle),
             },
             {
               key: "issue_description",
               header: "Issue",
-              render: (r) => r.issue_description || r.issueDescription || "—",
+              render: (r) => renderIssueCell(r),
             },
             { key: "status", header: "Status", render: (r) => statusBadge(r.status) },
             {
