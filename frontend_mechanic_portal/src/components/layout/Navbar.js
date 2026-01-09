@@ -32,9 +32,7 @@ export function Navbar({ user }) {
               <NavLink to="/profile" className={({ isActive }) => (isActive ? "navlink active" : "navlink")}>
                 Profile
               </NavLink>
-              <NavLink to="/demo-sms" className={({ isActive }) => (isActive ? "navlink active" : "navlink")}>
-                SMS Demo
-              </NavLink>
+
             </>
           ) : null}
         </nav>
