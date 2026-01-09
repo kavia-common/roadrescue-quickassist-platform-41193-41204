@@ -71,6 +71,38 @@ export function RequestDetailPage({ user }) {
     }
   };
 
+  // Defensive: req.notes may be null / object / string depending on schema variance.
+  // Normalize to a stable array so slice/reverse/map never throw.
+  // NOTE: Don't use hooks here; this component has early returns above and hooks must not be conditional.
+  const notes = req?.notes;
+  let normalizedNotes = [];
+
+  if (Array.isArray(notes)) {
+    normalizedNotes = notes;
+  } else if (notes && typeof notes === "object") {
+    if (Array.isArray(notes.items)) {
+      normalizedNotes = notes.items;
+    } else {
+      const vals = Object.values(notes);
+      if (Array.isArray(vals)) normalizedNotes = vals;
+    }
+  } else if (typeof notes === "string") {
+    try {
+      const parsed = JSON.parse(notes);
+      if (Array.isArray(parsed)) {
+        normalizedNotes = parsed;
+      } else if (parsed && typeof parsed === "object") {
+        if (Array.isArray(parsed.items)) normalizedNotes = parsed.items;
+        else {
+          const vals = Object.values(parsed);
+          if (Array.isArray(vals)) normalizedNotes = vals;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   if (error) {
     return (
       <div className="container">
@@ -181,20 +213,23 @@ export function RequestDetailPage({ user }) {
           </Link>
         </div>
 
-        {req.notes?.length ? (
+        {normalizedNotes.length ? (
           <>
             <div className="divider" />
             <div>
               <div className="label">History</div>
               <ul style={{ margin: "8px 0 0", paddingLeft: 18, color: "var(--text)" }}>
-                {req.notes.slice().reverse().map((n) => (
-                  <li key={n.id} style={{ margin: "8px 0" }}>
-                    <span style={{ color: "var(--muted)", fontWeight: 800 }}>
-                      {new Date(n.at).toLocaleString()} • {n.by}:
-                    </span>{" "}
-                    <span style={{ fontWeight: 700 }}>{n.text}</span>
-                  </li>
-                ))}
+                {normalizedNotes
+                  .slice()
+                  .reverse()
+                  .map((n, idx) => (
+                    <li key={n?.id || `${n?.at || "note"}_${idx}`} style={{ margin: "8px 0" }}>
+                      <span style={{ color: "var(--muted)", fontWeight: 800 }}>
+                        {n?.at ? new Date(n.at).toLocaleString() : "—"} • {n?.by || "System"}:
+                      </span>{" "}
+                      <span style={{ fontWeight: 700 }}>{n?.text || "—"}</span>
+                    </li>
+                  ))}
               </ul>
             </div>
           </>
