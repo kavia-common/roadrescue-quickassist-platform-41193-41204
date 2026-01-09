@@ -28,7 +28,7 @@ export function PendingApprovalPage({ user }) {
     }
   };
 
-  const statusLabel = freshUser?.approved ? "Approved" : "Pending";
+  const statusLabel = freshUser?.approved || freshUser?.status === "approved" ? "Approved" : "Pending";
 
   return (
     <div className="container">

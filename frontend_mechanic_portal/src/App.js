@@ -60,7 +60,7 @@ function App() {
               path="/dashboard"
               element={
                 <RequireAuth user={user}>
-                  {user?.approved ? <DashboardPage user={user} /> : <Navigate to="/pending" replace />}
+                  {user?.approved || user?.status === "approved" ? <DashboardPage user={user} /> : <Navigate to="/pending" replace />}
                 </RequireAuth>
               }
             />
@@ -68,7 +68,7 @@ function App() {
               path="/assignments"
               element={
                 <RequireAuth user={user}>
-                  {user?.approved ? <MyAssignmentsPage user={user} /> : <Navigate to="/pending" replace />}
+                  {user?.approved || user?.status === "approved" ? <MyAssignmentsPage user={user} /> : <Navigate to="/pending" replace />}
                 </RequireAuth>
               }
             />
@@ -76,7 +76,7 @@ function App() {
               path="/requests/:requestId"
               element={
                 <RequireAuth user={user}>
-                  {user?.approved ? <RequestDetailPage user={user} /> : <Navigate to="/pending" replace />}
+                  {user?.approved || user?.status === "approved" ? <RequestDetailPage user={user} /> : <Navigate to="/pending" replace />}
                 </RequireAuth>
               }
             />
@@ -84,7 +84,7 @@ function App() {
               path="/profile"
               element={
                 <RequireAuth user={user}>
-                  {user?.approved ? <ProfilePage user={user} onUserUpdated={setUser} /> : <Navigate to="/pending" replace />}
+                  {user?.approved || user?.status === "approved" ? <ProfilePage user={user} onUserUpdated={setUser} /> : <Navigate to="/pending" replace />}
                 </RequireAuth>
               }
             />

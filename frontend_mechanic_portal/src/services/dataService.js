@@ -239,6 +239,12 @@ async function supaGetUserRole(supabase, userId, email) {
      * - some environments may still have `approved` boolean; we treat it as:
      *   approved === true => status 'approved'
      *   approved === false => status 'pending'
+     *
+     * SECURITY NOTE:
+     * This mechanic portal should NOT attempt to auto-create a profile row on login.
+     * Profile creation should happen during explicit registration (mechanic signup)
+     * or via server-side automation. Auto-creating here can violate RLS and cause
+     * confusing login failures.
      */
     const { data, error } = await supabase
       .from("profiles")
@@ -249,17 +255,7 @@ async function supaGetUserRole(supabase, userId, email) {
     if (error) return { role: "user", approved: true, status: "approved", displayName: "", serviceArea: "" };
 
     if (!data) {
-      // Default profile for unknown users is a normal approved user (not a mechanic).
-      // NOTE: Do not insert unknown columns if they might not exist; keep minimal payload.
-      await supabase.from("profiles").insert({
-        id: userId,
-        email,
-        role: "user",
-        status: "approved",
-        approved_at: new Date().toISOString(),
-        display_name: "",
-        service_area: "",
-      });
+      // No profile row yet. Treat as non-mechanic (approved user) but do NOT insert anything from the client.
       return { role: "user", approved: true, status: "approved", displayName: "", serviceArea: "" };
     }
 
@@ -490,62 +486,69 @@ export const dataService = {
   // PUBLIC_INTERFACE
   async registerMechanic({ name, email, password, phone, serviceType }) {
     /**
-     * Registers a new mechanic:
+     * Registers a new mechanic (Supabase mode only):
      * - Creates a Supabase Auth user (email/password)
-     * - Creates/updates a `public.profiles` row with:
-     *   role='mechanic', status='pending', approved_at=null
+     * - Inserts a `public.profiles` row where:
+     *   - id = auth.uid() (must match for RLS)
+     *   - role = 'mechanic'
+     *   - status = 'pending'
+     *   - approved/approved_at remain unset (admin-only)
      *
-     * NOTE: In production, the recommended approach is a DB trigger on auth.users insert,
-     * but this client-side flow is provided for MVP completeness.
+     * SECURITY / RLS ALIGNMENT:
+     * - Client must NOT write restricted fields such as: approved=true, approved_at, admin-only columns.
+     * - Only a minimal set of allowed fields should be written by this portal.
      */
     ensureSeedData();
     const supabase = getSupabase();
     if (!supabase) throw new Error("Supabase is not configured.");
 
-    // Create auth user (also signs them in).
-    const { data, error } = await supabase.auth.signUp({
-      email,
-      password,
-    });
+    // Create auth user (also signs them in, depending on Supabase auth settings).
+    const { data, error } = await supabase.auth.signUp({ email, password });
     if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not create account."));
 
-    const user = data?.user;
-    if (!user) {
-      // In some cases signUp may require email confirmation; user might be null.
-      // Still show a professional message.
+    // In some auth configurations, signUp returns no session/user until email confirmation.
+    // RLS-protected profile insert requires an authenticated user (auth.uid()).
+    // We therefore require the user object here; otherwise we cannot insert their profile.
+    const signedUpUser = data?.user;
+    if (!signedUpUser) {
       throw new Error("Account created, but no session was returned. Please check your email and then sign in.");
     }
 
-    // Create profile row. We attempt to include optional columns; if schema is missing them, retry minimally.
-    const profilePayload = {
-      id: user.id,
+    // Ensure we are using the current authenticated uid (RLS uses auth.uid()).
+    const authed = await requireSupabaseUser(supabase);
+    const uidToUse = authed?.id;
+    if (!uidToUse) throw new Error("Could not determine authenticated user id.");
+
+    // Allowed profile fields for mechanic registration (avoid restricted fields).
+    const baseProfilePayload = {
+      id: uidToUse,
       email,
       role: "mechanic",
       status: "pending",
-      approved_at: null,
-      full_name: name,
+      // Do NOT send approved/approved_at/approved_by/etc from client.
       display_name: name,
       phone: phone || null,
       service_type: serviceType || null,
     };
 
-    const { error: pErr } = await supabase.from("profiles").upsert(profilePayload);
+    // Try insert with optional columns first; if schema differs, retry with minimal safe columns.
+    const { error: pErr } = await supabase.from("profiles").insert(baseProfilePayload);
     if (pErr) {
-      // Retry with only required columns.
-      const { error: pErr2 } = await supabase.from("profiles").upsert({
-        id: user.id,
+      // Retry with only the columns required by RLS + common schema.
+      const minimal = {
+        id: uidToUse,
         email,
         role: "mechanic",
         status: "pending",
-        approved_at: null,
-      });
+      };
+
+      const { error: pErr2 } = await supabase.from("profiles").insert(minimal);
       if (pErr2) throw new Error(friendlySupabaseErrorMessage(pErr2, "Could not create profile."));
     }
 
-    // Return mechanic user object for app state
     return {
-      id: user.id,
-      email: user.email,
+      id: uidToUse,
+      email: authed.email || email,
       role: "mechanic",
       approved: false,
       displayName: name,
@@ -630,6 +633,7 @@ export const dataService = {
         email: user.email,
         role: roleInfo.role,
         approved: roleInfo.approved,
+        status: roleInfo.status,
         displayName: roleInfo.displayName,
         serviceArea: roleInfo.serviceArea,
       };

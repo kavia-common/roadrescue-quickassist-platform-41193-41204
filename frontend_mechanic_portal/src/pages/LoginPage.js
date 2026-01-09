@@ -39,7 +39,7 @@ export function LoginPage({ onAuthed }) {
       onAuthed?.(u);
 
       // IMPORTANT: pending mechanics must not access dashboard.
-      if (!u.approved) {
+      if (!u.approved && u.status !== "approved") {
         navigate("/pending");
       } else {
         navigate("/dashboard");

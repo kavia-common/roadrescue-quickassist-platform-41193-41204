@@ -40,7 +40,7 @@ export function Navbar({ user }) {
         <div className="nav-right">
           {user ? (
             <>
-              <span className="chip">{user.approved ? "Approved" : "Pending approval"}</span>
+              <span className="chip">{user.approved || user.status === "approved" ? "Approved" : "Pending approval"}</span>
               <Button variant="ghost" onClick={onLogout}>
                 Log out
               </Button>
