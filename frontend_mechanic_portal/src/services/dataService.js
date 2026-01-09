@@ -35,7 +35,18 @@ function ensureSeedData() {
     { id: uid("u"), email: "user@example.com", password: "password123", role: "user", approved: true },
     // Demo mechanic should be able to exercise the primary flow (accepting requests)
     // in mock mode without needing an admin approval step.
-    { id: uid("m"), email: "mech@example.com", password: "password123", role: "mechanic", approved: true, profile: { name: "Alex Mechanic", serviceArea: "Downtown" } },
+    {
+      id: uid("m"),
+      email: "mech@example.com",
+      password: "password123",
+      role: "mechanic",
+      approved: true,
+      // New flat fields used by Profile page:
+      displayName: "Alex Mechanic",
+      serviceArea: "Downtown",
+      // Kept for backward compatibility with any older UI code:
+      profile: { name: "Alex Mechanic", serviceArea: "Downtown" },
+    },
     { id: uid("a"), email: "admin@example.com", password: "password123", role: "admin", approved: true },
   ];
 
@@ -245,15 +256,44 @@ function normalizeRequestRow(r) {
 
 async function supaGetUserRole(supabase, userId, email) {
   try {
-    const { data, error } = await supabase.from("profiles").select("role,approved,profile").eq("id", userId).maybeSingle();
-    if (error) return { role: "user", approved: true, profile: null };
+    /**
+     * IMPORTANT:
+     * Older iterations stored mechanic info under profiles.profile (JSON).
+     * That column may not exist, producing errors like:
+     *   "Could not find the 'profile' column of 'profiles' in the schema cache."
+     *
+     * Mechanic Portal now uses flat columns:
+     * - profiles.display_name (text)
+     * - profiles.service_area (text)
+     */
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("role,approved,display_name,service_area")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (error) return { role: "user", approved: true, displayName: "", serviceArea: "" };
+
     if (!data) {
-      await supabase.from("profiles").insert({ id: userId, email, role: "user", approved: true });
-      return { role: "user", approved: true, profile: null };
+      await supabase.from("profiles").insert({
+        id: userId,
+        email,
+        role: "user",
+        approved: true,
+        display_name: "",
+        service_area: "",
+      });
+      return { role: "user", approved: true, displayName: "", serviceArea: "" };
     }
-    return { role: data.role || "user", approved: data.approved ?? true, profile: data.profile || null };
+
+    return {
+      role: data.role || "user",
+      approved: data.approved ?? true,
+      displayName: data.display_name || "",
+      serviceArea: data.service_area || "",
+    };
   } catch {
-    return { role: "user", approved: true, profile: null };
+    return { role: "user", approved: true, displayName: "", serviceArea: "" };
   }
 }
 
@@ -340,14 +380,28 @@ export const dataService = {
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Login failed."));
       const user = data.user;
       const roleInfo = await supaGetUserRole(supabase, user.id, user.email);
-      return { id: user.id, email: user.email, role: roleInfo.role, approved: roleInfo.approved, profile: roleInfo.profile };
+      return {
+        id: user.id,
+        email: user.email,
+        role: roleInfo.role,
+        approved: roleInfo.approved,
+        displayName: roleInfo.displayName,
+        serviceArea: roleInfo.serviceArea,
+      };
     }
 
     const users = getLocalUsers();
     const match = users.find((u) => u.email.toLowerCase() === email.toLowerCase() && u.password === password);
     if (!match) throw new Error("Invalid email or password.");
     setLocalSession({ userId: match.id });
-    return { id: match.id, email: match.email, role: match.role, approved: match.approved, profile: match.profile };
+    return {
+      id: match.id,
+      email: match.email,
+      role: match.role,
+      approved: match.approved,
+      displayName: match.displayName || match.profile?.name || "",
+      serviceArea: match.serviceArea || match.profile?.serviceArea || "",
+    };
   },
 
   // PUBLIC_INTERFACE
@@ -377,7 +431,14 @@ export const dataService = {
     const users = getLocalUsers();
     const u = users.find((x) => x.id === session.userId);
     if (!u) return null;
-    return { id: u.id, email: u.email, role: u.role, approved: u.approved, profile: u.profile };
+    return {
+      id: u.id,
+      email: u.email,
+      role: u.role,
+      approved: u.approved,
+      displayName: u.displayName || u.profile?.name || "",
+      serviceArea: u.serviceArea || u.profile?.serviceArea || "",
+    };
   },
 
   // PUBLIC_INTERFACE
@@ -598,11 +659,24 @@ export const dataService = {
   },
 
   // PUBLIC_INTERFACE
-  async updateProfile({ userId, profile }) {
+  async updateProfile({ userId, displayName, serviceArea }) {
     ensureSeedData();
     const supabase = getSupabase();
     if (supabase) {
-      const { error } = await supabase.from("profiles").update({ profile }).eq("id", userId);
+      /**
+       * IMPORTANT:
+       * This app expects flat columns on `profiles`:
+       * - display_name (text)
+       * - service_area (text)
+       *
+       * If these columns do not exist yet, add them (see ../assets/supabase.md).
+       */
+      const payload = {
+        display_name: (displayName || "").trim(),
+        service_area: (serviceArea || "").trim(),
+      };
+
+      const { error } = await supabase.from("profiles").update(payload).eq("id", userId);
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not save profile."));
       return true;
     }
@@ -610,7 +684,16 @@ export const dataService = {
     const users = getLocalUsers();
     const idx = users.findIndex((u) => u.id === userId);
     if (idx < 0) throw new Error("User not found.");
-    users[idx] = { ...users[idx], profile };
+    users[idx] = {
+      ...users[idx],
+      displayName: (displayName || "").trim(),
+      serviceArea: (serviceArea || "").trim(),
+      // Keep legacy nested object for any older code paths:
+      profile: {
+        name: (displayName || "").trim(),
+        serviceArea: (serviceArea || "").trim(),
+      },
+    };
     setLocalUsers(users);
     return true;
   },

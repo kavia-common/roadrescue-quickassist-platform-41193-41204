@@ -6,9 +6,9 @@ import { dataService } from "../services/dataService";
 
 // PUBLIC_INTERFACE
 export function ProfilePage({ user, onUserUpdated }) {
-  /** Mechanic profile editor (name, service area). */
-  const [name, setName] = useState(user.profile?.name || "");
-  const [serviceArea, setServiceArea] = useState(user.profile?.serviceArea || "");
+  /** Mechanic profile editor (display name, service area). */
+  const [displayName, setDisplayName] = useState(user.displayName || "");
+  const [serviceArea, setServiceArea] = useState(user.serviceArea || "");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
@@ -17,12 +17,12 @@ export function ProfilePage({ user, onUserUpdated }) {
     e.preventDefault();
     setMsg("");
     setError("");
-    if (!name.trim()) return setError("Name is required.");
+    if (!displayName.trim()) return setError("Display name is required.");
     setBusy(true);
     try {
-      const profile = { name: name.trim(), serviceArea: serviceArea.trim() };
-      await dataService.updateProfile({ userId: user.id, profile });
-      onUserUpdated?.({ ...user, profile });
+      const updates = { displayName: displayName.trim(), serviceArea: serviceArea.trim() };
+      await dataService.updateProfile({ userId: user.id, ...updates });
+      onUserUpdated?.({ ...user, ...updates });
       setMsg("Profile saved.");
     } catch (e2) {
       setError(e2.message || "Could not save profile.");
@@ -40,8 +40,20 @@ export function ProfilePage({ user, onUserUpdated }) {
 
       <Card title="Mechanic details" subtitle="Stored in Supabase profiles when configured; otherwise local demo storage.">
         <form className="form" onSubmit={save}>
-          <Input label="Display name" name="name" value={name} onChange={(e) => setName(e.target.value)} required />
-          <Input label="Service area" name="serviceArea" value={serviceArea} onChange={(e) => setServiceArea(e.target.value)} placeholder="e.g., Downtown, Northside" />
+          <Input
+            label="Display name"
+            name="displayName"
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            required
+          />
+          <Input
+            label="Service area"
+            name="serviceArea"
+            value={serviceArea}
+            onChange={(e) => setServiceArea(e.target.value)}
+            placeholder="e.g., Downtown, Northside"
+          />
           {msg ? <div className="alert">{msg}</div> : null}
           {error ? <div className="alert alert-error">{error}</div> : null}
           <div className="row">
