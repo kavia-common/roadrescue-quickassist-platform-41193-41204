@@ -32,7 +32,9 @@ export function RequestDetailPage({ user }) {
   const [error, setError] = useState("");
 
   // Canonical statuses (shared across apps)
-  const allowedStatuses = useMemo(() => ["ASSIGNED", "EN_ROUTE", "WORKING", "COMPLETED"], []);
+  // Per attached requirements, mechanic flow is: assigned -> in_progress -> completed.
+  // We keep labels professional and map to DB in dataService (EN_ROUTE/WORKING -> in_progress).
+  const allowedStatuses = useMemo(() => ["ASSIGNED", "WORKING", "COMPLETED"], []);
 
   const load = async () => {
     setError("");

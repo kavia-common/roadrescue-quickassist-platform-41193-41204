@@ -60,10 +60,11 @@ function ensureSeedData() {
       vehicle: { make: "Toyota", model: "Corolla", year: "2016", plate: "ABC-123" },
       issueDescription: "Car won't start, clicking noise.",
       contact: { name: "Sam Driver", phone: "555-0101" },
-      status: "Submitted",
+      status: "OPEN",
       assignedMechanicId: null,
       assignedMechanicEmail: null,
-      notes: [],
+      // UI expects "notes" as a history list.
+      notes: [{ id: uid("n"), at: now, by: "System", text: "Request created." }],
     },
   ];
 
@@ -123,32 +124,14 @@ function setLocalRequests(reqs) {
  * Extracts {make, model, year, plate} from various possible DB shapes.
  * Supports:
  * - JSONB `vehicle` object
- * - flat columns like vehicle_make/vehicle_model
+ * - flat columns like vehicle_make/vehicle_model/vehicle_year/vehicle_plate
  * - alternate column names like make/model/year/plate
  */
 function normalizeVehicle(raw) {
-  /**
-   * Canonicalize vehicle fields into:
-   *   { make, model, year, plate }
-   *
-   * Supabase deployments differ; request rows might store vehicle as:
-   *  - requests.vehicle (JSONB)
-   *  - flat columns: vehicle_make / vehicle_model / vehicle_year / vehicle_plate
-   *  - flat columns: make / model / year / plate
-   *  - nested JSON objects: vehicle_info, vehicleDetails, etc.
-   *  - joined shapes: { request: { ... } } or { requests: { ... } }
-   *
-   * This function is intentionally defensive: it attempts multiple known shapes
-   * without assuming any one schema exists.
-   */
   const safeObj = (x) => (x && typeof x === "object" ? x : null);
 
-  // If we accidentally receive a wrapper (e.g. assignments join), unwrap it.
-  const base =
-    safeObj(raw?.request) ||
-    safeObj(raw?.requests) ||
-    safeObj(raw) ||
-    {};
+  // If we accidentally receive a wrapper (e.g. join), unwrap it.
+  const base = safeObj(raw?.request) || safeObj(raw?.requests) || safeObj(raw) || {};
 
   // Candidate objects that may contain vehicle fields.
   const vehicleCandidates = [
@@ -163,13 +146,9 @@ function normalizeVehicle(raw) {
   ].filter(Boolean);
 
   // Also support a case where vehicle is stored under a generic JSON payload.
-  const detailsCandidates = [
-    safeObj(base?.details),
-    safeObj(base?.meta),
-    safeObj(base?.metadata),
-    safeObj(base?.payload),
-    safeObj(base?.data),
-  ].filter(Boolean);
+  const detailsCandidates = [safeObj(base?.details), safeObj(base?.meta), safeObj(base?.metadata), safeObj(base?.payload), safeObj(base?.data)].filter(
+    Boolean
+  );
 
   const nestedVehicleFromDetails = detailsCandidates
     .map((d) => safeObj(d?.vehicle) || safeObj(d?.vehicle_info) || safeObj(d?.vehicleInfo) || safeObj(d?.car) || safeObj(d?.carInfo))
@@ -177,10 +156,9 @@ function normalizeVehicle(raw) {
 
   const allCandidates = [...vehicleCandidates, ...nestedVehicleFromDetails];
 
-  // Helper: return the first non-empty (non-null/undefined/empty-string) value
   const first = (...vals) => {
     for (const v of vals) {
-      if (v === 0) return v; // allow numeric year 0 (unlikely, but safe)
+      if (v === 0) return v;
       if (v === false) return v;
       if (v === null || v === undefined) continue;
       if (typeof v === "string" && v.trim() === "") continue;
@@ -189,26 +167,9 @@ function normalizeVehicle(raw) {
     return "";
   };
 
-  // Pull from JSON candidates first, then fall back to flat columns.
-  const make = first(
-    ...allCandidates.map((c) => c.make || c.Make || c.brand || c.manufacturer),
-    base?.vehicle_make,
-    base?.make
-  );
-
-  const model = first(
-    ...allCandidates.map((c) => c.model || c.Model),
-    base?.vehicle_model,
-    base?.model
-  );
-
-  const year = first(
-    ...allCandidates.map((c) => c.year || c.Year),
-    base?.vehicle_year,
-    base?.year
-  );
-
-  // Plates are very inconsistent; support a few common aliases.
+  const make = first(...allCandidates.map((c) => c.make || c.Make || c.brand || c.manufacturer), base?.vehicle_make, base?.make);
+  const model = first(...allCandidates.map((c) => c.model || c.Model), base?.vehicle_model, base?.model);
+  const year = first(...allCandidates.map((c) => c.year || c.Year), base?.vehicle_year, base?.year);
   const plate = first(
     ...allCandidates.map((c) => c.plate || c.Plate || c.licensePlate || c.license_plate || c.registration || c.reg),
     base?.vehicle_plate,
@@ -238,6 +199,10 @@ function normalizeContact(raw) {
 }
 
 function normalizeRequestRow(r) {
+  // Schema variance support:
+  // - "mechanic_id" (requested by attachment) vs "assigned_mechanic_id" (older deployments)
+  const mechanicId = r.mechanic_id ?? r.assigned_mechanic_id ?? r.assignedMechanicId ?? null;
+
   return {
     id: r.id,
     createdAt: r.created_at ?? r.createdAt ?? "",
@@ -246,10 +211,17 @@ function normalizeRequestRow(r) {
     vehicle: normalizeVehicle(r),
     issueDescription: r.issue_description ?? r.issueDescription ?? "",
     contact: normalizeContact(r),
+    address: r.address ?? "",
+    latitude: r.latitude ?? null,
+    longitude: r.longitude ?? null,
     // IMPORTANT: keep status canonical across apps
     status: normalizeStatus(r.status ?? ""),
-    assignedMechanicId: r.assigned_mechanic_id ?? r.assignedMechanicId ?? null,
+    assignedMechanicId: mechanicId,
+    // Some schemas store mechanic email; not always present.
     assignedMechanicEmail: r.assigned_mechanic_email ?? r.assignedMechanicEmail ?? null,
+    assignedAt: r.assigned_at ?? null,
+    completedAt: r.completed_at ?? null,
+    // Backward compatible: if the DB still has requests.notes (jsonb), we keep it.
     notes: r.notes || [],
   };
 }
@@ -258,19 +230,11 @@ async function supaGetUserRole(supabase, userId, email) {
   try {
     /**
      * IMPORTANT:
-     * Older iterations stored mechanic info under profiles.profile (JSON).
-     * That column may not exist, producing errors like:
-     *   "Could not find the 'profile' column of 'profiles' in the schema cache."
-     *
-     * Mechanic Portal now uses flat columns:
+     * Mechanic Portal uses flat columns:
      * - profiles.display_name (text)
      * - profiles.service_area (text)
      */
-    const { data, error } = await supabase
-      .from("profiles")
-      .select("role,approved,display_name,service_area")
-      .eq("id", userId)
-      .maybeSingle();
+    const { data, error } = await supabase.from("profiles").select("role,approved,display_name,service_area").eq("id", userId).maybeSingle();
 
     if (error) return { role: "user", approved: true, displayName: "", serviceArea: "" };
 
@@ -309,9 +273,62 @@ async function requireSupabaseUser(supabase) {
 function friendlySupabaseErrorMessage(err, fallback) {
   const msg = err?.message || "";
   if (!msg) return fallback;
-  // Common RLS message in Supabase
   if (msg.toLowerCase().includes("row level security")) return "Permission denied. Please contact an admin.";
   return msg;
+}
+
+/** Best-effort: detect if a Postgres column is missing based on error message. */
+function isMissingColumnError(err) {
+  const msg = err?.message || "";
+  return msg.toLowerCase().includes("column") && msg.toLowerCase().includes("does not exist");
+}
+
+/**
+ * Load notes from the dedicated request_notes table.
+ * Falls back to requests.notes jsonb if request_notes isn't available.
+ */
+async function loadRequestNotes(supabase, requestId) {
+  // request_notes: { id, request_id, author_role, note, created_at }
+  const { data, error } = await supabase
+    .from("request_notes")
+    .select("id,request_id,author_role,note,created_at")
+    .eq("request_id", requestId)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    if (isMissingColumnError(error) || (error.message || "").toLowerCase().includes("relation") || (error.message || "").toLowerCase().includes("schema cache")) {
+      // Table/columns not present in this deployment; caller may fall back.
+      return { notes: null, supported: false };
+    }
+    throw new Error(friendlySupabaseErrorMessage(error, "Could not load notes."));
+  }
+
+  const normalized = (data || []).map((n) => ({
+    id: n.id,
+    at: n.created_at,
+    by: n.author_role || "mechanic",
+    text: n.note || "",
+  }));
+
+  return { notes: normalized, supported: true };
+}
+
+async function insertRequestNote(supabase, { requestId, authorRole, noteText }) {
+  const payload = {
+    request_id: requestId,
+    author_role: authorRole,
+    note: noteText,
+    // created_at usually defaulted by DB; sending it is optional. We avoid in case of triggers/defaults.
+  };
+
+  const { error } = await supabase.from("request_notes").insert(payload);
+  if (error) {
+    if (isMissingColumnError(error) || (error.message || "").toLowerCase().includes("relation") || (error.message || "").toLowerCase().includes("schema cache")) {
+      return { supported: false };
+    }
+    throw new Error(friendlySupabaseErrorMessage(error, "Could not add note."));
+  }
+  return { supported: true };
 }
 
 /**
@@ -321,11 +338,10 @@ export const dataService = {
   /** Mechanic portal facade: login/logout + request acceptance and status updates. */
 
   // PUBLIC_INTERFACE
-  async createRequest({ user, vehicle, issueDescription, contact }) {
+  async createRequest({ user, vehicle, issueDescription, contact, address, latitude, longitude }) {
     /**
-     * Create a new request as a mechanic (if allowed).
-     * Always set status='open' per DB constraint; do not send custom 'id', and only provide null/valid UUID for optional fields.
-     * This method is included for completeness and cross-portal consistency; actual use depends on portal's allowed flows.
+     * Create a new request (mostly used in other portals).
+     * Status must start as OPEN/open depending on schema; we normalize in UI.
      */
     ensureSeedData();
     const supabase = getSupabase();
@@ -338,13 +354,19 @@ export const dataService = {
       vehicle,
       issueDescription,
       contact,
-      status: "open",
+      address: address || "",
+      latitude: latitude ?? null,
+      longitude: longitude ?? null,
+      status: "OPEN",
       assignedMechanicId: null,
       assignedMechanicEmail: null,
-      notes: [],
+      notes: [{ id: uid("n"), at: nowIso, by: "System", text: "Request created." }],
     };
 
     if (supabase) {
+      // Try both schema variants:
+      // - new: (mechanic_id, status='open')
+      // - old: (assigned_mechanic_id, status='OPEN')
       const insertPayload = {
         created_at: nowIso,
         user_id: user.id,
@@ -352,20 +374,27 @@ export const dataService = {
         vehicle,
         issue_description: issueDescription,
         contact,
+        address: address || "",
+        latitude: latitude ?? null,
+        longitude: longitude ?? null,
         status: "open",
-        assigned_mechanic_id: null,
-        assigned_mechanic_email: null,
-        notes: [],
+        mechanic_id: null,
       };
-      const { data, error } = await supabase.from("requests").insert(insertPayload).select().maybeSingle();
 
+      const { data, error } = await supabase.from("requests").insert(insertPayload).select().maybeSingle();
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not create request."));
       if (!data) throw new Error("Failed to insert request.");
 
-      return normalizeRequestRow(data);
+      const normalized = normalizeRequestRow(data);
+      // If request_notes exists, also add an initial note.
+      try {
+        await insertRequestNote(supabase, { requestId: normalized.id, authorRole: "admin", noteText: "Request created." });
+      } catch {
+        // ignore; request creation must still succeed
+      }
+      return await this.getRequestById(normalized.id);
     }
 
-    // In mock mode, assign a custom string ID.
     const all = getLocalRequests();
     setLocalRequests([request, ...all]);
     return request;
@@ -423,7 +452,14 @@ export const dataService = {
       const user = data?.user;
       if (!user) return null;
       const roleInfo = await supaGetUserRole(supabase, user.id, user.email);
-      return { id: user.id, email: user.email, role: roleInfo.role, approved: roleInfo.approved, profile: roleInfo.profile };
+      return {
+        id: user.id,
+        email: user.email,
+        role: roleInfo.role,
+        approved: roleInfo.approved,
+        displayName: roleInfo.displayName,
+        serviceArea: roleInfo.serviceArea,
+      };
     }
 
     const session = getLocalSession();
@@ -443,70 +479,58 @@ export const dataService = {
 
   // PUBLIC_INTERFACE
   async listUnassignedRequests() {
+    /**
+     * Mechanic dashboard "Open" list:
+     * Attachment expects: mechanics can view only open requests, and accept them.
+     */
     ensureSeedData();
     const supabase = getSupabase();
     if (supabase) {
-      const { data, error } = await supabase.from("requests").select("*").is("assigned_mechanic_id", null).order("created_at", { ascending: false });
+      // Prefer filtering by status='open' (per attachment). Also allow null mechanic_id.
+      // Some schemas store OPEN/Submitted, but we keep it flexible.
+      const { data, error } = await supabase
+        .from("requests")
+        .select("*")
+        .or("status.eq.open,status.eq.OPEN,status.eq.Submitted,status.eq.IN_REVIEW,status.eq.In Review")
+        .or("mechanic_id.is.null,assigned_mechanic_id.is.null")
+        .order("created_at", { ascending: false });
+
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load requests."));
-      return (data || []).map(normalizeRequestRow);
+      // We still only want "unassigned"; if RLS already restricted, this is fine.
+      return (data || [])
+        .map(normalizeRequestRow)
+        .filter((r) => !r.assignedMechanicId && normalizeStatus(r.status) === "OPEN");
     }
 
     const all = getLocalRequests();
-    return all.filter((r) => !r.assignedMechanicId && (r.status === "Submitted" || r.status === "In Review"));
+    return all.filter((r) => !r.assignedMechanicId && normalizeStatus(r.status) === "OPEN");
   },
 
   // PUBLIC_INTERFACE
   async listMyAssignments(mechanicId) {
+    /**
+     * Mechanic "My Assignments" list:
+     * Attachment expects mechanics can view requests where status='open' OR mechanic_id=auth.uid()
+     */
     ensureSeedData();
     const supabase = getSupabase();
 
-    // Supabase mode: read from assignments and join back to request data.
     if (supabase) {
       const authedUser = await requireSupabaseUser(supabase);
-
-      // Prefer the current session user id to avoid spoofing.
       const effectiveMechanicId = authedUser.id || mechanicId;
       if (!effectiveMechanicId) throw new Error("Missing mechanic id.");
 
-      /**
-       * We expect an `assignments` table with a FK to `requests`:
-       * - assignments: { id, mechanic_id, request_id, created_at? }
-       * - requests: existing requests row
-       *
-       * IMPORTANT: Some deployments do NOT have assignments.accepted_at. Avoid selecting/ordering by it.
-       *
-       * This query shape assumes a relationship exists in Supabase:
-       * assignments.request_id -> requests.id
-       *
-       * IMPORTANT (schema variance):
-       * Different deployments store vehicle data differently:
-       *  - requests.vehicle (JSONB)
-       *  - or flat columns (vehicle_make/vehicle_model/...)
-       *  - or make/model/year/plate columns
-       *
-       * Selecting columns that don't exist causes hard SQL errors like:
-       *   "column requests_1.vehicle_plate does not exist"
-       *
-       * Therefore, we only select the joined request row as `*` and normalize vehicle/contact
-       * in JS via normalizeRequestRow(). If `vehicle` exists as JSON, it'll be included; if not,
-       * normalizeVehicle() will gracefully fall back to whatever flat fields are present.
-       */
+      // Support both schema variants for mechanic_id/assigned_mechanic_id.
       const { data, error } = await supabase
-        .from("assignments")
-        .select("id, mechanic_id, request_id, request:requests(*)")
-        .eq("mechanic_id", effectiveMechanicId)
-        // Prefer deterministic ordering without relying on optional columns.
-        .order("request_id", { ascending: false });
+        .from("requests")
+        .select("*")
+        .or(`mechanic_id.eq.${effectiveMechanicId},assigned_mechanic_id.eq.${effectiveMechanicId}`)
+        .order("created_at", { ascending: false });
 
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load assignments."));
-
-      return (data || [])
-        .map((a) => a?.request || a?.requests)
-        .filter(Boolean)
-        .map(normalizeRequestRow);
+      return (data || []).map(normalizeRequestRow);
     }
 
-    // Mock mode: requests are the source of truth.
     const all = getLocalRequests();
     return all.filter((r) => r.assignedMechanicId === mechanicId);
   },
@@ -518,7 +542,23 @@ export const dataService = {
       const { data, error } = await supabase.from("requests").select("*").eq("id", requestId).maybeSingle();
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load request."));
       if (!data) return null;
-      return normalizeRequestRow(data);
+
+      const base = normalizeRequestRow(data);
+
+      // Preferred notes source: request_notes table
+      try {
+        const { notes, supported } = await loadRequestNotes(supabase, requestId);
+        if (supported && Array.isArray(notes)) {
+          return { ...base, notes };
+        }
+      } catch (e) {
+        // If we cannot load notes for non-schema reasons, surface it (but do not hard-fail request view).
+        // We keep the request visible and rely on any embedded notes.
+        // eslint-disable-next-line no-console
+        console.warn("Could not load request_notes:", e);
+      }
+
+      return base;
     }
 
     const all = getLocalRequests();
@@ -527,102 +567,100 @@ export const dataService = {
 
   // PUBLIC_INTERFACE
   async acceptRequest({ requestId, mechanic }) {
+    /**
+     * Accepting an open request assigns it to current mechanic.
+     *
+     * Attachment expected automation:
+     * - set mechanic_id
+     * - status = 'assigned'
+     * - set assigned_at
+     *
+     * RLS: block mechanic actions unless approved=true (enforced by DB policies).
+     */
     ensureSeedData();
-    const note = { id: uid("n"), at: new Date().toISOString(), by: mechanic.email, text: "Accepted request." };
 
     const supabase = getSupabase();
     if (supabase) {
       const authedUser = await requireSupabaseUser(supabase);
-
-      /**
-       * Some deployments do not have a UNIQUE constraint that matches common upsert conflict targets.
-       * To remain schema-agnostic, we do a SELECT then UPDATE/INSERT for assignments.
-       *
-       * Cross-app requirement:
-       * - Supabase is the source of truth.
-       * - On accept, write a professional canonical status to requests.status.
-       *   We standardize on: ASSIGNED
-       */
       const mechanicId = authedUser.id;
       const mechanicEmail = authedUser.email || mechanic.email;
 
-      // Preload existing request for note append and to avoid overwriting notes incorrectly.
       const existing = await this.getRequestById(requestId);
       if (!existing) throw new Error("Request not found.");
 
-      // If already assigned to someone else, stop (unless it's already assigned to this same mechanic).
       if (existing.assignedMechanicId && existing.assignedMechanicId !== mechanicId) {
         throw new Error("This request was already assigned to another mechanic.");
       }
 
-      // 1) Ensure an assignment exists (idempotent, without ON CONFLICT)
-      const { data: existingAssignment, error: findErr } = await supabase
-        .from("assignments")
-        .select("id")
-        .eq("request_id", requestId)
-        .eq("mechanic_id", mechanicId)
-        .maybeSingle();
+      const assignedAt = new Date().toISOString();
 
-      if (findErr) {
-        throw new Error(friendlySupabaseErrorMessage(findErr, "Could not accept this request."));
-      }
+      // Try updating the attachment schema first: mechanic_id / assigned_at / status='assigned'
+      // If those columns don't exist, fall back to legacy assigned_mechanic_* and status='ASSIGNED'.
+      const updatePayloadPreferred = {
+        mechanic_id: mechanicId,
+        status: "assigned",
+        assigned_at: assignedAt,
+      };
 
-      if (existingAssignment?.id) {
-        const { error: updateAssignErr } = await supabase
-          .from("assignments")
-          .update({
-            mechanic_id: mechanicId,
-            request_id: requestId,
-          })
-          .eq("id", existingAssignment.id);
+      let updatedRow = null;
+      const { data: updated1, error: err1 } = await supabase.from("requests").update(updatePayloadPreferred).eq("id", requestId).select("*").maybeSingle();
 
-        if (updateAssignErr) {
-          throw new Error(friendlySupabaseErrorMessage(updateAssignErr, "Could not accept this request."));
-        }
-      } else {
-        const { error: insertAssignErr } = await supabase.from("assignments").insert({
-          mechanic_id: mechanicId,
-          request_id: requestId,
-        });
-
-        if (insertAssignErr) {
-          throw new Error(friendlySupabaseErrorMessage(insertAssignErr, "Could not accept this request."));
-        }
-      }
-
-      // 2) Update request row (status transition + linking fields)
-      const { data: updated, error: reqErr } = await supabase
-        .from("requests")
-        .update({
+      if (!err1) {
+        updatedRow = updated1;
+      } else if (isMissingColumnError(err1)) {
+        const updatePayloadLegacy = {
           assigned_mechanic_id: mechanicId,
           assigned_mechanic_email: mechanicEmail,
           status: "ASSIGNED",
-          notes: [...(existing?.notes || []), note],
-        })
-        .eq("id", requestId)
-        .select("*")
-        .maybeSingle();
+          // some schemas may still have assigned_at; try but do not assume.
+          assigned_at: assignedAt,
+        };
 
-      if (reqErr) {
-        throw new Error(friendlySupabaseErrorMessage(reqErr, "Accepted assignment but failed to update request status."));
+        const { data: updated2, error: err2 } = await supabase.from("requests").update(updatePayloadLegacy).eq("id", requestId).select("*").maybeSingle();
+        if (err2) throw new Error(friendlySupabaseErrorMessage(err2, "Could not accept this request."));
+        updatedRow = updated2;
+      } else {
+        throw new Error(friendlySupabaseErrorMessage(err1, "Could not accept this request."));
       }
 
-      // Return updated request so caller can refresh UI immediately without re-querying if desired
-      return updated ? normalizeRequestRow(updated) : true;
+      // Add a service note. Prefer request_notes; fall back to embedding in requests.notes.
+      const noteText = "Accepted request.";
+      const noteAt = new Date().toISOString();
+
+      const inserted = await insertRequestNote(supabase, { requestId, authorRole: "mechanic", noteText });
+      if (!inserted.supported) {
+        // Fallback: append to json notes field (if present).
+        try {
+          const safeExistingNotes = Array.isArray(existing?.notes) ? existing.notes : [];
+          const fallbackNote = { id: uid("n"), at: noteAt, by: mechanicEmail || "mechanic", text: noteText };
+          await supabase
+            .from("requests")
+            .update({
+              notes: [...safeExistingNotes, fallbackNote],
+            })
+            .eq("id", requestId);
+        } catch {
+          // ignore; accept already succeeded
+        }
+      }
+
+      return updatedRow ? await this.getRequestById(requestId) : true;
     }
 
-    // Mock mode behavior intact (also standardize to canonical)
+    // Mock mode
     const all = getLocalRequests();
     const idx = all.findIndex((r) => r.id === requestId);
     if (idx < 0) throw new Error("Request not found.");
     const r = all[idx];
     if (r.assignedMechanicId) throw new Error("Request already assigned.");
+
     all[idx] = {
       ...r,
       assignedMechanicId: mechanic.id,
       assignedMechanicEmail: mechanic.email,
       status: "ASSIGNED",
-      notes: [...(r.notes || []), note],
+      assignedAt: new Date().toISOString(),
+      notes: [...(r.notes || []), { id: uid("n"), at: new Date().toISOString(), by: mechanic.email, text: "Accepted request." }],
     };
     setLocalRequests(all);
     return all[idx];
@@ -630,30 +668,104 @@ export const dataService = {
 
   // PUBLIC_INTERFACE
   async updateRequestStatus({ requestId, status, mechanic, noteText }) {
+    /**
+     * Status updates for assigned requests.
+     * Attachment flow: assigned -> in_progress -> completed
+     * UI currently uses EN_ROUTE/WORKING/COMPLETED; we map those to in_progress/completed.
+     */
     ensureSeedData();
     const canonical = normalizeStatus(status);
+    const supabase = getSupabase();
+
+    if (supabase) {
+      const authedUser = await requireSupabaseUser(supabase);
+      const mechanicId = authedUser.id;
+
+      // Map canonical UI tokens to attachment schema statuses:
+      // - ASSIGNED -> assigned
+      // - EN_ROUTE/WORKING -> in_progress
+      // - COMPLETED -> completed
+      const mapped =
+        canonical === "COMPLETED"
+          ? "completed"
+          : canonical === "ASSIGNED"
+            ? "assigned"
+            : canonical === "OPEN"
+              ? "open"
+              : "in_progress";
+
+      const existing = await this.getRequestById(requestId);
+      if (!existing) throw new Error("Request not found.");
+
+      // Best-effort: if not assigned yet, require accept first (UI already does, but keep safe).
+      const effectiveAssignedTo = existing.assignedMechanicId;
+      if (!effectiveAssignedTo) {
+        throw new Error("This request is not assigned yet. Accept it first.");
+      }
+      if (effectiveAssignedTo !== mechanicId) {
+        throw new Error("You can only update requests assigned to you.");
+      }
+
+      const completedAt = mapped === "completed" ? new Date().toISOString() : null;
+
+      // Prefer attachment schema update
+      const preferredPayload = completedAt
+        ? { status: mapped, completed_at: completedAt }
+        : { status: mapped };
+
+      const { error: err1 } = await supabase.from("requests").update(preferredPayload).eq("id", requestId);
+
+      if (err1) {
+        if (isMissingColumnError(err1)) {
+          // Fall back to legacy schema: status tokens are stored uppercase and no completed_at.
+          const { error: err2 } = await supabase.from("requests").update({ status: canonical }).eq("id", requestId);
+          if (err2) throw new Error(friendlySupabaseErrorMessage(err2, "Could not update status."));
+        } else {
+          throw new Error(friendlySupabaseErrorMessage(err1, "Could not update status."));
+        }
+      }
+
+      // Add a note (request_notes preferred).
+      const noteToWrite = (noteText || "").trim() || `Status changed to ${canonical}.`;
+      const inserted = await insertRequestNote(supabase, { requestId, authorRole: "mechanic", noteText: noteToWrite });
+      if (!inserted.supported) {
+        // Fallback to embedding JSON notes
+        try {
+          const safeExistingNotes = Array.isArray(existing?.notes) ? existing.notes : [];
+          const fallbackNote = { id: uid("n"), at: new Date().toISOString(), by: authedUser.email || mechanic.email, text: noteToWrite };
+          await supabase
+            .from("requests")
+            .update({
+              notes: [...safeExistingNotes, fallbackNote],
+            })
+            .eq("id", requestId);
+        } catch {
+          // ignore
+        }
+      }
+
+      return true;
+    }
+
+    // Mock mode
+    const all = getLocalRequests();
+    const idx = all.findIndex((r) => r.id === requestId);
+    if (idx < 0) throw new Error("Request not found.");
+
+    const mappedStatus = canonical === "COMPLETED" ? "COMPLETED" : canonical === "ASSIGNED" ? "ASSIGNED" : "WORKING";
     const note = {
       id: uid("n"),
       at: new Date().toISOString(),
       by: mechanic.email,
-      text: noteText || `Status changed to ${canonical}.`,
+      text: (noteText || "").trim() || `Status changed to ${canonical}.`,
     };
 
-    const supabase = getSupabase();
-    if (supabase) {
-      const existing = await this.getRequestById(requestId);
-      const { error } = await supabase
-        .from("requests")
-        .update({ status: canonical, notes: [...(existing?.notes || []), note] })
-        .eq("id", requestId);
-      if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not update status."));
-      return true;
-    }
-
-    const all = getLocalRequests();
-    const idx = all.findIndex((r) => r.id === requestId);
-    if (idx < 0) throw new Error("Request not found.");
-    all[idx] = { ...all[idx], status: canonical, notes: [...(all[idx].notes || []), note] };
+    all[idx] = {
+      ...all[idx],
+      status: mappedStatus,
+      completedAt: canonical === "COMPLETED" ? new Date().toISOString() : all[idx].completedAt,
+      notes: [...(all[idx].notes || []), note],
+    };
     setLocalRequests(all);
     return true;
   },
@@ -664,12 +776,9 @@ export const dataService = {
     const supabase = getSupabase();
     if (supabase) {
       /**
-       * IMPORTANT:
-       * This app expects flat columns on `profiles`:
+       * Expected flat columns on `profiles`:
        * - display_name (text)
        * - service_area (text)
-       *
-       * If these columns do not exist yet, add them (see ../assets/supabase.md).
        */
       const payload = {
         display_name: (displayName || "").trim(),
@@ -688,7 +797,6 @@ export const dataService = {
       ...users[idx],
       displayName: (displayName || "").trim(),
       serviceArea: (serviceArea || "").trim(),
-      // Keep legacy nested object for any older code paths:
       profile: {
         name: (displayName || "").trim(),
         serviceArea: (serviceArea || "").trim(),
