@@ -126,7 +126,60 @@ th{font-size:12px; text-transform:uppercase; letter-spacing:0.06em; color:var(--
 .divider{height:1px; background: var(--border); margin: 12px 0}
 .skeleton{background: rgba(255,255,255,0.7); border:1px solid var(--border); border-radius: var(--radius); padding:18px; box-shadow: var(--shadow-sm);}
 
+/* --- Map (Leaflet) --- */
+.map-card{
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+  background: #fff;
+}
+.map-card__header{
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(37,99,235,0.06), rgba(255,255,255,0));
+}
+.map-card__title{
+  font-weight: 900;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+.map-card__subtitle{
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.3;
+}
+.map-frame{
+  position: relative;
+  width: 100%;
+  background: #f3f4f6;
+}
+.map-container{
+  width: 100%;
+  height: 100%;
+}
+.map-fallback{
+  position:absolute;
+  inset: 0;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  padding: 14px;
+  text-align:center;
+}
+.leaflet-container{
+  font: inherit;
+}
+.leaflet-control-attribution{
+  font-size: 11px;
+}
+
 @media (max-width: 720px){
   .grid2{grid-template-columns:1fr}
   .table{min-width: 560px}
+  .map-card__header{padding: 10px 12px}
 }
