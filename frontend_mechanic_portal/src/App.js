@@ -8,6 +8,8 @@ import { RequireAuth } from "./routes/RequireAuth";
 import { dataService } from "./services/dataService";
 
 import { LoginPage } from "./pages/LoginPage";
+import { RegisterPage } from "./pages/RegisterPage";
+import { PendingApprovalPage } from "./pages/PendingApprovalPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { MyAssignmentsPage } from "./pages/MyAssignmentsPage";
 import { RequestDetailPage } from "./pages/RequestDetailPage";
@@ -43,12 +45,22 @@ function App() {
           <Routes>
             <Route path="/" element={<Navigate to={user ? "/dashboard" : "/login"} replace />} />
             <Route path="/login" element={<LoginPage onAuthed={setUser} />} />
+            <Route path="/register" element={<RegisterPage onAuthed={setUser} />} />
+
+            <Route
+              path="/pending"
+              element={
+                <RequireAuth user={user}>
+                  <PendingApprovalPage user={user} />
+                </RequireAuth>
+              }
+            />
 
             <Route
               path="/dashboard"
               element={
                 <RequireAuth user={user}>
-                  <DashboardPage user={user} />
+                  {user?.approved ? <DashboardPage user={user} /> : <Navigate to="/pending" replace />}
                 </RequireAuth>
               }
             />
@@ -56,7 +68,7 @@ function App() {
               path="/assignments"
               element={
                 <RequireAuth user={user}>
-                  <MyAssignmentsPage user={user} />
+                  {user?.approved ? <MyAssignmentsPage user={user} /> : <Navigate to="/pending" replace />}
                 </RequireAuth>
               }
             />
@@ -64,7 +76,7 @@ function App() {
               path="/requests/:requestId"
               element={
                 <RequireAuth user={user}>
-                  <RequestDetailPage user={user} />
+                  {user?.approved ? <RequestDetailPage user={user} /> : <Navigate to="/pending" replace />}
                 </RequireAuth>
               }
             />
@@ -72,11 +84,10 @@ function App() {
               path="/profile"
               element={
                 <RequireAuth user={user}>
-                  <ProfilePage user={user} onUserUpdated={setUser} />
+                  {user?.approved ? <ProfilePage user={user} onUserUpdated={setUser} /> : <Navigate to="/pending" replace />}
                 </RequireAuth>
               }
             />
-
 
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

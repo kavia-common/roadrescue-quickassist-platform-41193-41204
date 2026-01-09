@@ -230,34 +230,57 @@ async function supaGetUserRole(supabase, userId, email) {
   try {
     /**
      * IMPORTANT:
-     * Mechanic Portal uses flat columns:
-     * - profiles.display_name (text)
-     * - profiles.service_area (text)
+     * Mechanic approval flow uses:
+     * - profiles.role = 'mechanic'
+     * - profiles.status in ('pending','approved','rejected')
+     * - profiles.approved_at timestamp (nullable)
+     *
+     * Backward compatibility:
+     * - some environments may still have `approved` boolean; we treat it as:
+     *   approved === true => status 'approved'
+     *   approved === false => status 'pending'
      */
-    const { data, error } = await supabase.from("profiles").select("role,approved,display_name,service_area").eq("id", userId).maybeSingle();
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("role,approved,status,approved_at,display_name,service_area,phone,service_type,full_name")
+      .eq("id", userId)
+      .maybeSingle();
 
-    if (error) return { role: "user", approved: true, displayName: "", serviceArea: "" };
+    if (error) return { role: "user", approved: true, status: "approved", displayName: "", serviceArea: "" };
 
     if (!data) {
+      // Default profile for unknown users is a normal approved user (not a mechanic).
+      // NOTE: Do not insert unknown columns if they might not exist; keep minimal payload.
       await supabase.from("profiles").insert({
         id: userId,
         email,
         role: "user",
-        approved: true,
+        status: "approved",
+        approved_at: new Date().toISOString(),
         display_name: "",
         service_area: "",
       });
-      return { role: "user", approved: true, displayName: "", serviceArea: "" };
+      return { role: "user", approved: true, status: "approved", displayName: "", serviceArea: "" };
     }
 
+    const role = data.role || "user";
+
+    // Derive effective status
+    const explicitStatus = data.status ? String(data.status).toLowerCase() : null;
+    const legacyApproved = data.approved;
+
+    const effectiveStatus = explicitStatus || (legacyApproved === true ? "approved" : legacyApproved === false ? "pending" : "approved");
+    const approved = effectiveStatus === "approved";
+
     return {
-      role: data.role || "user",
-      approved: data.approved ?? true,
-      displayName: data.display_name || "",
+      role,
+      approved,
+      status: effectiveStatus,
+      displayName: data.display_name || data.full_name || "",
       serviceArea: data.service_area || "",
     };
   } catch {
-    return { role: "user", approved: true, displayName: "", serviceArea: "" };
+    return { role: "user", approved: true, status: "approved", displayName: "", serviceArea: "" };
   }
 }
 
@@ -462,7 +485,73 @@ async function insertRequestNote(supabase, { requestId, authorRole, noteText }) 
  * PUBLIC_INTERFACE
  */
 export const dataService = {
-  /** Mechanic portal facade: login/logout + request acceptance and status updates. */
+  /** Mechanic portal facade: registration/login/logout + request acceptance and status updates. */
+
+  // PUBLIC_INTERFACE
+  async registerMechanic({ name, email, password, phone, serviceType }) {
+    /**
+     * Registers a new mechanic:
+     * - Creates a Supabase Auth user (email/password)
+     * - Creates/updates a `public.profiles` row with:
+     *   role='mechanic', status='pending', approved_at=null
+     *
+     * NOTE: In production, the recommended approach is a DB trigger on auth.users insert,
+     * but this client-side flow is provided for MVP completeness.
+     */
+    ensureSeedData();
+    const supabase = getSupabase();
+    if (!supabase) throw new Error("Supabase is not configured.");
+
+    // Create auth user (also signs them in).
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+    });
+    if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not create account."));
+
+    const user = data?.user;
+    if (!user) {
+      // In some cases signUp may require email confirmation; user might be null.
+      // Still show a professional message.
+      throw new Error("Account created, but no session was returned. Please check your email and then sign in.");
+    }
+
+    // Create profile row. We attempt to include optional columns; if schema is missing them, retry minimally.
+    const profilePayload = {
+      id: user.id,
+      email,
+      role: "mechanic",
+      status: "pending",
+      approved_at: null,
+      full_name: name,
+      display_name: name,
+      phone: phone || null,
+      service_type: serviceType || null,
+    };
+
+    const { error: pErr } = await supabase.from("profiles").upsert(profilePayload);
+    if (pErr) {
+      // Retry with only required columns.
+      const { error: pErr2 } = await supabase.from("profiles").upsert({
+        id: user.id,
+        email,
+        role: "mechanic",
+        status: "pending",
+        approved_at: null,
+      });
+      if (pErr2) throw new Error(friendlySupabaseErrorMessage(pErr2, "Could not create profile."));
+    }
+
+    // Return mechanic user object for app state
+    return {
+      id: user.id,
+      email: user.email,
+      role: "mechanic",
+      approved: false,
+      displayName: name,
+      serviceArea: "",
+    };
+  },
 
   // PUBLIC_INTERFACE
   async createRequest({ user, vehicle, issueDescription, contact, address, latitude, longitude }) {
@@ -607,14 +696,25 @@ export const dataService = {
   // PUBLIC_INTERFACE
   async listUnassignedRequests() {
     /**
-     * Mechanic dashboard "Open" list:
-     * Attachment expects: mechanics can view only open requests, and accept them.
+     * Mechanic dashboard "Open" list.
+     *
+     * SECURITY REQUIREMENT:
+     * - Pending mechanics must be blocked from accessing requests (also enforced by RLS).
      */
     ensureSeedData();
     const supabase = getSupabase();
     if (supabase) {
+      const authedUser = await requireSupabaseUser(supabase);
+      const roleInfo = await supaGetUserRole(supabase, authedUser.id, authedUser.email);
+
+      if (roleInfo.role !== "mechanic") {
+        throw new Error("This portal is for mechanics only.");
+      }
+      if (!roleInfo.approved) {
+        throw new Error("Your account is awaiting admin approval.");
+      }
+
       // Prefer filtering by status='open' (per attachment). Also allow null mechanic_id.
-      // Some schemas store OPEN/Submitted, but we keep it flexible.
       const { data, error } = await supabase
         .from("requests")
         .select("*")
@@ -623,7 +723,6 @@ export const dataService = {
         .order("created_at", { ascending: false });
 
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load requests."));
-      // We still only want "unassigned"; if RLS already restricted, this is fine.
       return (data || [])
         .map(normalizeRequestRow)
         .filter((r) => !r.assignedMechanicId && normalizeStatus(r.status) === "OPEN");
@@ -636,18 +735,28 @@ export const dataService = {
   // PUBLIC_INTERFACE
   async listMyAssignments(mechanicId) {
     /**
-     * Mechanic "My Assignments" list:
-     * Attachment expects mechanics can view requests where status='open' OR mechanic_id=auth.uid()
+     * Mechanic "My Assignments" list.
+     *
+     * SECURITY REQUIREMENT:
+     * - Pending mechanics must be blocked from accessing requests (also enforced by RLS).
      */
     ensureSeedData();
     const supabase = getSupabase();
 
     if (supabase) {
       const authedUser = await requireSupabaseUser(supabase);
+      const roleInfo = await supaGetUserRole(supabase, authedUser.id, authedUser.email);
+
+      if (roleInfo.role !== "mechanic") {
+        throw new Error("This portal is for mechanics only.");
+      }
+      if (!roleInfo.approved) {
+        throw new Error("Your account is awaiting admin approval.");
+      }
+
       const effectiveMechanicId = authedUser.id || mechanicId;
       if (!effectiveMechanicId) throw new Error("Missing mechanic id.");
 
-      // Support both schema variants for mechanic_id/assigned_mechanic_id.
       const { data, error } = await supabase
         .from("requests")
         .select("*")
@@ -697,18 +806,23 @@ export const dataService = {
     /**
      * Accepting an open request assigns it to current mechanic.
      *
-     * Atomic requirements:
-     * - set mechanic_id (or legacy assigned_mechanic_id)
-     * - status: open -> assigned
-     * - set assigned_at
-     *
-     * We implement this with a single guarded update statement in Supabase mode.
+     * SECURITY REQUIREMENT:
+     * - Only approved mechanics can accept jobs (also enforced by RLS).
      */
     ensureSeedData();
 
     const supabase = getSupabase();
     if (supabase) {
       const authedUser = await requireSupabaseUser(supabase);
+      const roleInfo = await supaGetUserRole(supabase, authedUser.id, authedUser.email);
+
+      if (roleInfo.role !== "mechanic") {
+        throw new Error("This portal is for mechanics only.");
+      }
+      if (!roleInfo.approved) {
+        throw new Error("Your account is awaiting admin approval.");
+      }
+
       const mechanicId = authedUser.id;
       const mechanicEmail = authedUser.email || mechanic.email;
 
@@ -721,16 +835,11 @@ export const dataService = {
       });
 
       if (!updated) {
-        // Either already assigned, or request doesn't exist, or status isn't open in the newer schema.
-        // Provide a user-friendly message; caller will refresh list.
         throw new Error("This request was already accepted by someone else.");
       }
 
-      // Add a service note. Prefer request_notes; fall back to embedding in requests.notes.
       const noteText = "Accepted request.";
       const noteAt = new Date().toISOString();
-
-      // We need the current notes for fallback embedding.
       const existing = await this.getRequestById(requestId);
 
       const inserted = await insertRequestNote(supabase, { requestId, authorRole: "mechanic", noteText });
@@ -776,8 +885,8 @@ export const dataService = {
     /**
      * Status updates for assigned requests.
      *
-     * Attachment flow: assigned -> in_progress -> completed
-     * UI currently uses ASSIGNED/WORKING/COMPLETED; we map those onto start/complete transitions.
+     * SECURITY REQUIREMENT:
+     * - Only approved mechanics can update requests (also enforced by RLS).
      */
     ensureSeedData();
     const canonical = normalizeStatus(status);
@@ -785,12 +894,20 @@ export const dataService = {
 
     if (supabase) {
       const authedUser = await requireSupabaseUser(supabase);
+      const roleInfo = await supaGetUserRole(supabase, authedUser.id, authedUser.email);
+
+      if (roleInfo.role !== "mechanic") {
+        throw new Error("This portal is for mechanics only.");
+      }
+      if (!roleInfo.approved) {
+        throw new Error("Your account is awaiting admin approval.");
+      }
+
       const mechanicId = authedUser.id;
 
       const existing = await this.getRequestById(requestId);
       if (!existing) throw new Error("Request not found.");
 
-      // Best-effort: if not assigned yet, require accept first (UI already does, but keep safe).
       const effectiveAssignedTo = existing.assignedMechanicId;
       if (!effectiveAssignedTo) {
         throw new Error("This request is not assigned yet. Accept it first.");
@@ -799,12 +916,6 @@ export const dataService = {
         throw new Error("You can only update requests assigned to you.");
       }
 
-      /**
-       * We treat transitions as:
-       * - WORKING (or EN_ROUTE) => start (assigned -> in_progress)
-       * - COMPLETED => complete (in_progress -> completed, completed_at set)
-       * - ASSIGNED => no-op or keep assigned (but allow status write for compatibility)
-       */
       if (canonical === "COMPLETED") {
         await supaAtomicCompleteRequest(supabase, {
           requestId,
@@ -814,7 +925,6 @@ export const dataService = {
       } else if (canonical === "WORKING" || canonical === "EN_ROUTE") {
         await supaAtomicStartRequest(supabase, { requestId, mechanicId });
       } else if (canonical === "ASSIGNED") {
-        // Keep compatible: attempt to set assigned (no timestamps here; accept flow sets assigned_at).
         const { error } = await supabase.from("requests").update({ status: "assigned" }).eq("id", requestId).eq("mechanic_id", mechanicId);
         if (error && !isMissingColumnError(error)) {
           throw new Error(friendlySupabaseErrorMessage(error, "Could not update status."));
@@ -824,11 +934,9 @@ export const dataService = {
           if (e2) throw new Error(friendlySupabaseErrorMessage(e2, "Could not update status."));
         }
       } else {
-        // OPEN shouldn't happen for assigned mechanics; treat as in_progress for safety.
         await supaAtomicStartRequest(supabase, { requestId, mechanicId });
       }
 
-      // Add a note (request_notes preferred).
       const noteToWrite = (noteText || "").trim() || `Status changed to ${canonical}.`;
       const inserted = await insertRequestNote(supabase, { requestId, authorRole: "mechanic", noteText: noteToWrite });
       if (!inserted.supported) {
