@@ -9,7 +9,7 @@ See the user website `assets/supabase.md` for the broader schema overview. This 
 
 ## Key RLS fix (mechanic registration)
 
-Problem: mechanic registration creates a Supabase Auth user then inserts into `public.profiles`. RLS previously blocked this with:
+Problem: mechanic registration creates a Supabase Auth user then inserts into `public.profiles`. RLS was blocking this with:
 > new row violates row-level security policy for table profiles
 
 Fix: RLS now explicitly allows an authenticated user to insert **their own** profile row as long as:
@@ -18,8 +18,10 @@ Fix: RLS now explicitly allows an authenticated user to insert **their own** pro
 - If inserting a mechanic profile, the row must start as **pending/unapproved**:
   - `role = 'mechanic'`
   - `status = 'pending'` (or null treated as pending)
-  - `approved = false`
+  - `approved = false` (or null treated as false)
   - `approved_at is null`
+
+This enables mechanic signup while keeping approval as an admin-only workflow.
 
 ## Roles & approval model (enforced)
 
@@ -47,18 +49,23 @@ Notes:
 
 ## `public.profiles` RLS policies (effective behavior)
 
-- **SELECT**
-  - authenticated user can select their own profile (`auth.uid() = id`)
-  - admin can select all
+### SELECT
+- authenticated user can select their own profile (`auth.uid() = id`)
+- admin can select all (via `is_admin()`)
 
-- **INSERT**
-  - authenticated user can insert their own profile row (`auth.uid() = id`)
-  - if inserting as `role='mechanic'`, must be pending/unapproved (see above)
-  - admin can insert any
+### INSERT
+- authenticated user can insert their own profile row (`auth.uid() = id`)
+- if inserting as `role='mechanic'`, must be pending/unapproved (see above)
+- admin can insert any
 
-- **UPDATE**
-  - authenticated user can update their own profile but **cannot self-approve** and cannot change role/status/approved/approved_at
-  - admin can update any field (including approving mechanics)
+### UPDATE
+Because Postgres RLS policies cannot reliably reference `OLD.*` in a portable way, we enforce a simpler “no self-approval” constraint:
+
+- authenticated user can update their own profile **only if the resulting row remains non-approved**:
+  - `status` must not be `'approved'` (can remain null / pending)
+  - `approved` must be false (or null treated as false)
+  - `approved_at` must be null
+- admin can update any field (including approving mechanics) via admin-only policy
 
 ## Mechanic access gating (approved-only)
 
@@ -78,6 +85,6 @@ In Supabase Dashboard:
   - plus your production domain `https://.../**`
 
 2) Ensure roles are assigned:
-- `app_metadata.role` should be set for admins (and optionally mechanics) using Admin API / dashboard workflows.
+- `app_metadata.role` should be set for admins using Admin API / dashboard workflows.
 
-Task completed: Updated Supabase RLS to allow self profile inserts/selects and enforce approved-mechanic-only access, and documented the new policy behavior for the mechanic portal.
+Task completed: Updated Supabase RLS for `profiles` so authenticated users can insert/select their own row during signup while keeping approvals/admin access strictly gated.
