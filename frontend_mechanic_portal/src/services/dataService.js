@@ -111,6 +111,7 @@ function setLocalRequests(reqs) {
 
 /** Cross-portal refresh/event bus (per-portal, but consistent event name). */
 const REQUESTS_CHANGED_EVENT = "requests-changed";
+const PROFILES_CHANGED_EVENT = "profiles-changed";
 
 /**
  * Emit a lightweight signal that "requests changed".
@@ -123,6 +124,20 @@ function emitRequestsChanged(detail) {
   } catch {
     // ignore (older browsers / restricted environments)
   }
+}
+
+function emitProfilesChanged(detail) {
+  try {
+    window.dispatchEvent(new CustomEvent(PROFILES_CHANGED_EVENT, { detail }));
+  } catch {
+    // ignore
+  }
+}
+
+function subscribeToProfilesChanged(handler) {
+  const wrapped = (e) => handler?.(e?.detail);
+  window.addEventListener(PROFILES_CHANGED_EVENT, wrapped);
+  return () => window.removeEventListener(PROFILES_CHANGED_EVENT, wrapped);
 }
 
 // PUBLIC_INTERFACE
@@ -273,16 +288,49 @@ function normalizeRequestRow(r) {
 }
 
 async function supaGetUserRole(supabase, userId, email) {
+  /**
+   * Load the user's `profiles` row and return canonical authz fields:
+   * - role: "mechanic" | "approved_mechanic" | "admin" | "user"
+   * - approved: boolean
+   *
+   * IMPORTANT (approval gate):
+   * In this portal, mechanics should not be able to log in until:
+   *   role in ["mechanic","approved_mechanic"] AND approved === true
+   *
+   * Therefore we must NOT default to approved=true if the profile row is missing.
+   * Instead, we best-effort create a *pending mechanic* profile row:
+   *   role="mechanic", approved=false
+   *
+   * If `profiles` table is missing or blocked by RLS, we fall back to permissive
+   * defaults so demo setups don't fully break (but admin approval won't work
+   * without the table anyway).
+   */
   try {
     const { data, error } = await supabase.from("profiles").select("role,approved,profile").eq("id", userId).maybeSingle();
-    if (error) return { role: "user", approved: true, profile: null };
+
+    // If schema/RLS blocks reads, keep UX moving (cannot reliably gate).
+    if (error) return { role: "mechanic", approved: true, profile: null };
+
     if (!data) {
-      await supabase.from("profiles").insert({ id: userId, email, role: "user", approved: true });
-      return { role: "user", approved: true, profile: null };
+      // Create a pending mechanic profile row (best-effort). Some schemas may not have `email`.
+      try {
+        const { error: insertErr } = await supabase.from("profiles").insert({ id: userId, role: "mechanic", approved: false });
+        if (!insertErr) return { role: "mechanic", approved: false, profile: null };
+      } catch {
+        // ignore insert failure
+      }
+
+      // If insert failed (schema mismatch), fall back to a conservative "pending mechanic".
+      return { role: "mechanic", approved: false, profile: null };
     }
-    return { role: data.role || "user", approved: data.approved ?? true, profile: data.profile || null };
+
+    return {
+      role: data.role || "mechanic",
+      approved: data.approved ?? false,
+      profile: data.profile || null,
+    };
   } catch {
-    return { role: "user", approved: true, profile: null };
+    return { role: "mechanic", approved: true, profile: null };
   }
 }
 
@@ -342,22 +390,36 @@ function ensureRealtimeSubscription() {
   try {
     supabase
       .channel("rrqa-requests")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "requests" },
-        (payload) => {
-          emitRequestsChanged({ source: "supabase-realtime", payload });
-        }
-      )
+      .on("postgres_changes", { event: "*", schema: "public", table: "requests" }, (payload) => {
+        emitRequestsChanged({ source: "supabase-realtime", payload });
+      })
       .subscribe();
   } catch {
     // ignore; realtime may not be enabled
+  }
+
+  // Best-effort: listen for mechanic/admin approvals in public.profiles.
+  try {
+    supabase
+      .channel("rrqa-profiles")
+      .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, (payload) => {
+        emitProfilesChanged({ source: "supabase-realtime", payload });
+      })
+      .subscribe();
+  } catch {
+    // ignore
   }
 }
 
 /**
  * PUBLIC_INTERFACE
  */
+function isApprovedMechanicProfile(userLike) {
+  const role = userLike?.role;
+  const approved = userLike?.approved === true;
+  return approved && (role === "mechanic" || role === "approved_mechanic");
+}
+
 export const dataService = {
   /** Mechanic portal facade: login/logout + request acceptance and status updates. */
 
@@ -366,6 +428,13 @@ export const dataService = {
     /** Subscribe to local in-app request change signals; returns unsubscribe(). */
     ensureRealtimeSubscription();
     return subscribeToRequestsChanged(handler);
+  },
+
+  // PUBLIC_INTERFACE
+  subscribeToProfilesChanged(handler) {
+    /** Subscribe to profile change signals (e.g., admin approvals); returns unsubscribe(). */
+    ensureRealtimeSubscription();
+    return subscribeToProfilesChanged(handler);
   },
 
   // PUBLIC_INTERFACE
@@ -428,19 +497,41 @@ export const dataService = {
   async login(email, password) {
     ensureSeedData();
     const supabase = getSupabase();
+
     if (supabase) {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Login failed."));
+
       const user = data.user;
       const roleInfo = await supaGetUserRole(supabase, user.id, user.email);
-      return { id: user.id, email: user.email, role: roleInfo.role, approved: roleInfo.approved, profile: roleInfo.profile };
+      const shaped = { id: user.id, email: user.email, role: roleInfo.role, approved: roleInfo.approved, profile: roleInfo.profile };
+
+      // Approval gate: only approved mechanics can proceed in this portal.
+      if (!isApprovedMechanicProfile(shaped)) {
+        // Clean up auth session so user isn't "half logged in" in this portal.
+        try {
+          await supabase.auth.signOut();
+        } catch {
+          // ignore
+        }
+        throw new Error("Your mechanic account is pending admin approval. Please try again once an admin approves your registration.");
+      }
+
+      return shaped;
     }
 
     const users = getLocalUsers();
     const match = users.find((u) => u.email.toLowerCase() === email.toLowerCase() && u.password === password);
     if (!match) throw new Error("Invalid email or password.");
+
+    const shaped = { id: match.id, email: match.email, role: match.role, approved: match.approved, profile: match.profile };
+
+    if (!isApprovedMechanicProfile(shaped)) {
+      throw new Error("Your mechanic account is pending admin approval. Please try again once an admin approves your registration.");
+    }
+
     setLocalSession({ userId: match.id });
-    return { id: match.id, email: match.email, role: match.role, approved: match.approved, profile: match.profile };
+    return shaped;
   },
 
   // PUBLIC_INTERFACE
