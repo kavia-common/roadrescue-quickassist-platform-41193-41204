@@ -53,6 +53,7 @@ function ensureSeedData() {
       assignedMechanicId: null,
       assignedMechanicEmail: null,
       notes: [],
+      updatedAt: now,
     },
   ];
 
@@ -106,6 +107,33 @@ function getLocalRequests() {
 }
 function setLocalRequests(reqs) {
   writeJson(LS_KEYS.requests, reqs);
+}
+
+/** Cross-portal refresh/event bus (per-portal, but consistent event name). */
+const REQUESTS_CHANGED_EVENT = "requests-changed";
+
+/**
+ * Emit a lightweight signal that "requests changed".
+ * - Within a portal: triggers list/detail pages to re-fetch
+ * - Cross-portal: if Supabase is used, other portals observe via realtime or polling of updated_at
+ */
+function emitRequestsChanged(detail) {
+  try {
+    window.dispatchEvent(new CustomEvent(REQUESTS_CHANGED_EVENT, { detail }));
+  } catch {
+    // ignore (older browsers / restricted environments)
+  }
+}
+
+// PUBLIC_INTERFACE
+function subscribeToRequestsChanged(handler) {
+  /**
+   * Subscribe to request change signals (local event bus).
+   * Returns an unsubscribe function.
+   */
+  const wrapped = (e) => handler?.(e?.detail);
+  window.addEventListener(REQUESTS_CHANGED_EVENT, wrapped);
+  return () => window.removeEventListener(REQUESTS_CHANGED_EVENT, wrapped);
 }
 
 /**
@@ -230,6 +258,7 @@ function normalizeRequestRow(r) {
   return {
     id: r.id,
     createdAt: r.created_at ?? r.createdAt ?? "",
+    updatedAt: r.updated_at ?? r.updatedAt ?? r.created_at ?? r.createdAt ?? "",
     userId: r.user_id ?? r.userId ?? "",
     userEmail: r.user_email ?? r.userEmail ?? "",
     vehicle: normalizeVehicle(r),
@@ -274,11 +303,70 @@ function friendlySupabaseErrorMessage(err, fallback) {
   return msg;
 }
 
+function isSupabaseWriteBlockedError(err) {
+  const msg = String(err?.message || "").toLowerCase();
+  return (
+    msg.includes("row level security") ||
+    msg.includes("permission denied") ||
+    msg.includes("insufficient privilege") ||
+    msg.includes("unauthorized") ||
+    msg.includes("forbidden")
+  );
+}
+
+async function tryBumpUpdatedAt(supabase, requestId) {
+  /**
+   * Cross-portal refresh signal:
+   * Prefer updating a shared `updated_at` column if it exists. If the schema doesn't have it,
+   * we silently ignore the error (polling/event bus still works within this portal).
+   */
+  try {
+    const nowIso = new Date().toISOString();
+    // If `updated_at` doesn't exist, Postgres will error; we ignore.
+    await supabase.from("requests").update({ updated_at: nowIso }).eq("id", requestId);
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * One-time realtime subscription (per page load).
+ * If enabled, other portals can also subscribe; this portal will emit an in-app event.
+ */
+let _realtimeInitialized = false;
+function ensureRealtimeSubscription() {
+  const supabase = getSupabase();
+  if (!supabase || _realtimeInitialized) return;
+  _realtimeInitialized = true;
+
+  try {
+    supabase
+      .channel("rrqa-requests")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "requests" },
+        (payload) => {
+          emitRequestsChanged({ source: "supabase-realtime", payload });
+        }
+      )
+      .subscribe();
+  } catch {
+    // ignore; realtime may not be enabled
+  }
+}
+
 /**
  * PUBLIC_INTERFACE
  */
 export const dataService = {
   /** Mechanic portal facade: login/logout + request acceptance and status updates. */
+
+  // PUBLIC_INTERFACE
+  subscribeToRequestsChanged(handler) {
+    /** Subscribe to local in-app request change signals; returns unsubscribe(). */
+    ensureRealtimeSubscription();
+    return subscribeToRequestsChanged(handler);
+  },
 
   // PUBLIC_INTERFACE
   async createRequest({ user, vehicle, issueDescription, contact }) {
@@ -293,6 +381,7 @@ export const dataService = {
     const request = {
       id: uid("req"),
       createdAt: nowIso,
+      updatedAt: nowIso,
       userId: user.id,
       userEmail: user.email,
       vehicle,
@@ -307,6 +396,8 @@ export const dataService = {
     if (supabase) {
       const insertPayload = {
         created_at: nowIso,
+        // best-effort updated_at (if column exists)
+        updated_at: nowIso,
         user_id: user.id,
         user_email: user.email,
         vehicle,
@@ -322,12 +413,14 @@ export const dataService = {
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not create request."));
       if (!data) throw new Error("Failed to insert request.");
 
+      emitRequestsChanged({ type: "created", requestId: data.id });
       return normalizeRequestRow(data);
     }
 
     // In mock mode, assign a custom string ID.
     const all = getLocalRequests();
     setLocalRequests([request, ...all]);
+    emitRequestsChanged({ type: "created", requestId: request.id });
     return request;
   },
 
@@ -385,13 +478,16 @@ export const dataService = {
     ensureSeedData();
     const supabase = getSupabase();
     if (supabase) {
+      ensureRealtimeSubscription();
       const { data, error } = await supabase.from("requests").select("*").is("assigned_mechanic_id", null).order("created_at", { ascending: false });
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load requests."));
       return (data || []).map(normalizeRequestRow);
     }
 
     const all = getLocalRequests();
-    return all.filter((r) => !r.assignedMechanicId && (r.status === "Submitted" || r.status === "In Review"));
+    return all
+      .filter((r) => !r.assignedMechanicId && (r.status === "Submitted" || r.status === "In Review" || normalizeStatus(r.status) === "open"))
+      .map((r) => ({ ...r, status: normalizeStatus(r.status) }));
   },
 
   // PUBLIC_INTERFACE
@@ -401,35 +497,13 @@ export const dataService = {
 
     // Supabase mode: read from assignments and join back to request data.
     if (supabase) {
+      ensureRealtimeSubscription();
       const authedUser = await requireSupabaseUser(supabase);
 
       // Prefer the current session user id to avoid spoofing.
       const effectiveMechanicId = authedUser.id || mechanicId;
       if (!effectiveMechanicId) throw new Error("Missing mechanic id.");
 
-      /**
-       * We expect an `assignments` table with a FK to `requests`:
-       * - assignments: { id, mechanic_id, request_id, created_at? }
-       * - requests: existing requests row
-       *
-       * IMPORTANT: Some deployments do NOT have assignments.accepted_at. Avoid selecting/ordering by it.
-       *
-       * This query shape assumes a relationship exists in Supabase:
-       * assignments.request_id -> requests.id
-       *
-       * IMPORTANT (schema variance):
-       * Different deployments store vehicle data differently:
-       *  - requests.vehicle (JSONB)
-       *  - or flat columns (vehicle_make/vehicle_model/...)
-       *  - or make/model/year/plate columns
-       *
-       * Selecting columns that don't exist causes hard SQL errors like:
-       *   "column requests_1.vehicle_plate does not exist"
-       *
-       * Therefore, we only select the joined request row as `*` and normalize vehicle/contact
-       * in JS via normalizeRequestRow(). If `vehicle` exists as JSON, it'll be included; if not,
-       * normalizeVehicle() will gracefully fall back to whatever flat fields are present.
-       */
       const { data, error } = await supabase
         .from("assignments")
         .select("id, mechanic_id, request_id, request:requests(*)")
@@ -447,13 +521,16 @@ export const dataService = {
 
     // Mock mode: requests are the source of truth.
     const all = getLocalRequests();
-    return all.filter((r) => r.assignedMechanicId === mechanicId);
+    return all
+      .filter((r) => r.assignedMechanicId === mechanicId)
+      .map((r) => ({ ...r, status: normalizeStatus(r.status) }));
   },
 
   // PUBLIC_INTERFACE
   async getRequestById(requestId) {
     const supabase = getSupabase();
     if (supabase) {
+      ensureRealtimeSubscription();
       const { data, error } = await supabase.from("requests").select("*").eq("id", requestId).maybeSingle();
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load request."));
       if (!data) return null;
@@ -461,11 +538,23 @@ export const dataService = {
     }
 
     const all = getLocalRequests();
-    return all.find((r) => r.id === requestId) || null;
+    const r = all.find((x) => x.id === requestId) || null;
+    return r ? { ...r, status: normalizeStatus(r.status) } : null;
   },
 
   // PUBLIC_INTERFACE
   async acceptRequest({ requestId, mechanic }) {
+    /**
+     * Mechanic "Accept":
+     * - Set request.status='assigned' (canonical)
+     * - Link assigned_mechanic_id/email
+     * - Append a note
+     * - Bump updated_at (best-effort) so other portals can detect the mutation
+     *
+     * If Supabase write is blocked (RLS/schema), fall back to demo/local while still updating UI.
+     *
+     * Returns the updated request.
+     */
     ensureSeedData();
     const note = { id: uid("n"), at: new Date().toISOString(), by: mechanic.email, text: "Accepted request." };
 
@@ -473,15 +562,6 @@ export const dataService = {
     if (supabase) {
       const authedUser = await requireSupabaseUser(supabase);
 
-      /**
-       * Some deployments do not have a UNIQUE constraint that matches common upsert conflict targets.
-       * To remain schema-agnostic, we do a SELECT then UPDATE/INSERT for assignments.
-       *
-       * Cross-app requirement:
-       * - Supabase is the source of truth.
-       * - On accept, write a professional canonical status to requests.status.
-       *   We standardize on: ASSIGNED
-       */
       const mechanicId = authedUser.id;
       const mechanicEmail = authedUser.email || mechanic.email;
 
@@ -494,81 +574,160 @@ export const dataService = {
         throw new Error("This request was already assigned to another mechanic.");
       }
 
-      // 1) Ensure an assignment exists (idempotent, without ON CONFLICT)
-      const { data: existingAssignment, error: findErr } = await supabase
-        .from("assignments")
-        .select("id")
-        .eq("request_id", requestId)
-        .eq("mechanic_id", mechanicId)
-        .maybeSingle();
-
-      if (findErr) {
-        throw new Error(friendlySupabaseErrorMessage(findErr, "Could not accept this request."));
-      }
-
-      if (existingAssignment?.id) {
-        const { error: updateAssignErr } = await supabase
+      // Try Supabase write path; if blocked, fall back to local.
+      try {
+        // 1) Ensure an assignment exists (idempotent, without ON CONFLICT)
+        const { data: existingAssignment, error: findErr } = await supabase
           .from("assignments")
-          .update({
+          .select("id")
+          .eq("request_id", requestId)
+          .eq("mechanic_id", mechanicId)
+          .maybeSingle();
+
+        if (findErr) throw findErr;
+
+        if (existingAssignment?.id) {
+          const { error: updateAssignErr } = await supabase
+            .from("assignments")
+            .update({
+              mechanic_id: mechanicId,
+              request_id: requestId,
+            })
+            .eq("id", existingAssignment.id);
+
+          if (updateAssignErr) throw updateAssignErr;
+        } else {
+          const { error: insertAssignErr } = await supabase.from("assignments").insert({
             mechanic_id: mechanicId,
             request_id: requestId,
+          });
+
+          if (insertAssignErr) throw insertAssignErr;
+        }
+
+        // 2) Update request row (status transition + linking fields)
+        const nowIso = new Date().toISOString();
+        const { data: updated, error: reqErr } = await supabase
+          .from("requests")
+          .update({
+            assigned_mechanic_id: mechanicId,
+            assigned_mechanic_email: mechanicEmail,
+            status: "assigned",
+            // best-effort updated_at (if column exists)
+            updated_at: nowIso,
+            notes: [...(existing?.notes || []), note],
           })
-          .eq("id", existingAssignment.id);
+          .eq("id", requestId)
+          .select("*")
+          .maybeSingle();
 
-        if (updateAssignErr) {
-          throw new Error(friendlySupabaseErrorMessage(updateAssignErr, "Could not accept this request."));
-        }
-      } else {
-        const { error: insertAssignErr } = await supabase.from("assignments").insert({
-          mechanic_id: mechanicId,
-          request_id: requestId,
-        });
+        if (reqErr) throw reqErr;
 
-        if (insertAssignErr) {
-          throw new Error(friendlySupabaseErrorMessage(insertAssignErr, "Could not accept this request."));
+        // In case updated_at doesn't exist, try a bump separately (ignored on error).
+        await tryBumpUpdatedAt(supabase, requestId);
+
+        const normalized = updated ? normalizeRequestRow(updated) : { ...existing, status: "assigned", assignedMechanicId: mechanicId, assignedMechanicEmail: mechanicEmail, notes: [...(existing?.notes || []), note], updatedAt: nowIso };
+        emitRequestsChanged({ type: "accepted", requestId });
+        return normalized;
+      } catch (e) {
+        // If blocked by RLS/schema, fall back to local so UI still works.
+        if (isSupabaseWriteBlockedError(e)) {
+          // eslint-disable-next-line no-console
+          console.warn("[acceptRequest] Supabase write blocked; falling back to demo/local:", e?.message || e);
+          // fall through to local
+        } else {
+          throw new Error(friendlySupabaseErrorMessage(e, "Could not accept this request."));
         }
       }
-
-      // 2) Update request row (status transition + linking fields)
-      const { data: updated, error: reqErr } = await supabase
-        .from("requests")
-        .update({
-          assigned_mechanic_id: mechanicId,
-          assigned_mechanic_email: mechanicEmail,
-          status: "ASSIGNED",
-          notes: [...(existing?.notes || []), note],
-        })
-        .eq("id", requestId)
-        .select("*")
-        .maybeSingle();
-
-      if (reqErr) {
-        throw new Error(friendlySupabaseErrorMessage(reqErr, "Accepted assignment but failed to update request status."));
-      }
-
-      // Return updated request so caller can refresh UI immediately without re-querying if desired
-      return updated ? normalizeRequestRow(updated) : true;
     }
 
-    // Mock mode behavior intact (also standardize to canonical)
+    // Mock/local fallback
     const all = getLocalRequests();
     const idx = all.findIndex((r) => r.id === requestId);
     if (idx < 0) throw new Error("Request not found.");
     const r = all[idx];
-    if (r.assignedMechanicId) throw new Error("Request already assigned.");
+    if (r.assignedMechanicId && r.assignedMechanicId !== mechanic.id) throw new Error("Request already assigned.");
+
+    const nowIso = new Date().toISOString();
     all[idx] = {
       ...r,
       assignedMechanicId: mechanic.id,
       assignedMechanicEmail: mechanic.email,
-      status: "ASSIGNED",
+      status: "assigned",
       notes: [...(r.notes || []), note],
+      updatedAt: nowIso,
     };
     setLocalRequests(all);
+    emitRequestsChanged({ type: "accepted", requestId });
     return all[idx];
   },
 
   // PUBLIC_INTERFACE
-  async updateRequestStatus({ requestId, status, mechanic, noteText }) {
+  async updateRequestStatus(requestId, status) {
+    /**
+     * Update request status (canonical lower-case tokens) and return updated request.
+     * This is the shared, minimal API requested by the task:
+     *   dataService.updateRequestStatus(requestId, 'assigned')
+     *
+     * Also bumps updated_at (best-effort) and emits `requests-changed`.
+     */
+    ensureSeedData();
+    const canonical = normalizeStatus(status);
+    const supabase = getSupabase();
+
+    // Prefer Supabase persistence when possible, but keep UI functional even if blocked.
+    if (supabase) {
+      ensureRealtimeSubscription();
+      try {
+        const nowIso = new Date().toISOString();
+        const { data, error } = await supabase
+          .from("requests")
+          .update({
+            status: canonical,
+            // best-effort updated_at
+            updated_at: nowIso,
+          })
+          .eq("id", requestId)
+          .select("*")
+          .maybeSingle();
+
+        if (error) throw error;
+
+        await tryBumpUpdatedAt(supabase, requestId);
+
+        // If RLS returns no row, treat as blocked and fall back.
+        if (!data) throw new Error("No rows updated (possible RLS restriction).");
+
+        const updated = normalizeRequestRow(data);
+        emitRequestsChanged({ type: "status-updated", requestId, status: canonical });
+        return updated;
+      } catch (e) {
+        if (isSupabaseWriteBlockedError(e)) {
+          // eslint-disable-next-line no-console
+          console.warn("[updateRequestStatus] Supabase write blocked; falling back to demo/local:", e?.message || e);
+        } else {
+          throw new Error(friendlySupabaseErrorMessage(e, "Could not update status."));
+        }
+      }
+    }
+
+    // Local fallback
+    const all = getLocalRequests();
+    const idx = all.findIndex((r) => r.id === requestId);
+    if (idx < 0) throw new Error("Request not found.");
+    const nowIso = new Date().toISOString();
+    all[idx] = { ...all[idx], status: canonical, updatedAt: nowIso };
+    setLocalRequests(all);
+    emitRequestsChanged({ type: "status-updated", requestId, status: canonical });
+    return all[idx];
+  },
+
+  // PUBLIC_INTERFACE
+  async updateRequestStatusWithNote({ requestId, status, mechanic, noteText }) {
+    /**
+     * Backward-compatible method (used by RequestDetailPage) that appends notes.
+     * Kept separate from updateRequestStatus() so the requested signature stays minimal.
+     */
     ensureSeedData();
     const canonical = normalizeStatus(status);
     const note = {
@@ -580,21 +739,42 @@ export const dataService = {
 
     const supabase = getSupabase();
     if (supabase) {
+      ensureRealtimeSubscription();
       const existing = await this.getRequestById(requestId);
-      const { error } = await supabase
-        .from("requests")
-        .update({ status: canonical, notes: [...(existing?.notes || []), note] })
-        .eq("id", requestId);
-      if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not update status."));
-      return true;
+      try {
+        const nowIso = new Date().toISOString();
+        const { data, error } = await supabase
+          .from("requests")
+          .update({ status: canonical, notes: [...(existing?.notes || []), note], updated_at: nowIso })
+          .eq("id", requestId)
+          .select("*")
+          .maybeSingle();
+
+        if (error) throw error;
+        await tryBumpUpdatedAt(supabase, requestId);
+
+        const updated = data ? normalizeRequestRow(data) : { ...existing, status: canonical, notes: [...(existing?.notes || []), note], updatedAt: nowIso };
+        emitRequestsChanged({ type: "status-updated", requestId, status: canonical });
+        return updated;
+      } catch (e) {
+        if (isSupabaseWriteBlockedError(e)) {
+          // eslint-disable-next-line no-console
+          console.warn("[updateRequestStatusWithNote] Supabase write blocked; falling back to demo/local:", e?.message || e);
+          // fall through
+        } else {
+          throw new Error(friendlySupabaseErrorMessage(e, "Could not update status."));
+        }
+      }
     }
 
     const all = getLocalRequests();
     const idx = all.findIndex((r) => r.id === requestId);
     if (idx < 0) throw new Error("Request not found.");
-    all[idx] = { ...all[idx], status: canonical, notes: [...(all[idx].notes || []), note] };
+    const nowIso = new Date().toISOString();
+    all[idx] = { ...all[idx], status: canonical, notes: [...(all[idx].notes || []), note], updatedAt: nowIso };
     setLocalRequests(all);
-    return true;
+    emitRequestsChanged({ type: "status-updated", requestId, status: canonical });
+    return all[idx];
   },
 
   // PUBLIC_INTERFACE

@@ -15,7 +15,7 @@ export function RequestDetailPage({ user }) {
   const [error, setError] = useState("");
 
   // Canonical statuses (shared across apps)
-  const allowedStatuses = useMemo(() => ["ASSIGNED", "EN_ROUTE", "WORKING", "COMPLETED"], []);
+  const allowedStatuses = useMemo(() => ["assigned", "in_progress", "completed"], []);
 
   const load = async () => {
     setError("");
@@ -39,7 +39,7 @@ export function RequestDetailPage({ user }) {
       if (!req.assignedMechanicId) {
         await dataService.acceptRequest({ requestId: req.id, mechanic: user });
       }
-      await dataService.updateRequestStatus({ requestId: req.id, status, mechanic: user, noteText: note.trim() || undefined });
+      await dataService.updateRequestStatusWithNote({ requestId: req.id, status, mechanic: user, noteText: note.trim() || undefined });
       setNote("");
       await load();
     } catch (e) {
