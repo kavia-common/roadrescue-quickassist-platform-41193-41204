@@ -226,6 +226,75 @@ function normalizeRequestRow(r) {
   };
 }
 
+/**
+ * Timeout wrapper for network calls. Supabase errors can manifest as hangs when network is blocked.
+ */
+async function withTimeout(promise, ms, message) {
+  let t;
+  const timeout = new Promise((_, reject) => {
+    t = window.setTimeout(() => reject(new Error(message)), ms);
+  });
+
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    window.clearTimeout(t);
+  }
+}
+
+/** Best-effort: detect missing env config so we can guide the user. */
+function envConfigHint() {
+  const { url, key } = getSupabaseEnv();
+  if (!url || !key) {
+    return "Missing Supabase configuration. Confirm REACT_APP_SUPABASE_URL and REACT_APP_SUPABASE_KEY are set for this environment.";
+  }
+  return "";
+}
+
+/**
+ * Convert an unknown supabase-js error / PostgREST error into a more helpful UI message.
+ * Also logs the full error to console.debug for diagnostics.
+ */
+function parseSupabaseError(err, fallback, context) {
+  // eslint-disable-next-line no-console
+  console.debug("[Supabase error]", { context, err });
+
+  const base = err?.message || err?.error_description || err?.details || "";
+  const msg = String(base || "").trim();
+
+  const lower = msg.toLowerCase();
+
+  if (!msg) {
+    // Network errors often don't have a clean message.
+    if (err?.name === "AbortError") return `${fallback} Network request timed out. Please retry.`;
+    return `${fallback} ${envConfigHint()}`.trim();
+  }
+
+  if (lower.includes("row level security") || lower.includes("violates row-level security") || lower.includes("row-level security policy")) {
+    return `${fallback} Permission denied by security policy (RLS). If you are registering, ensure profile id equals auth.uid() and the profile starts as pending.`;
+  }
+
+  if (lower.includes("invalid login credentials")) {
+    return "Invalid email or password.";
+  }
+
+  if (lower.includes("failed to fetch") || lower.includes("networkerror") || lower.includes("network request failed")) {
+    return `${fallback} Network error: unable to reach Supabase. Please check your connection and Supabase URL configuration.`;
+  }
+
+  if (lower.includes("jwt") && lower.includes("expired")) {
+    return "Your session has expired. Please log in again.";
+  }
+
+  // Append config hint if it looks like a URL/key issue
+  if (lower.includes("invalid api key") || lower.includes("api key") || lower.includes("not allowed") || lower.includes("unauthorized")) {
+    const hint = envConfigHint();
+    return hint ? `${msg} ${hint}` : msg;
+  }
+
+  return msg || fallback;
+}
+
 async function supaGetUserRole(supabase, userId, email) {
   try {
     /**
@@ -282,10 +351,32 @@ async function supaGetUserRole(supabase, userId, email) {
 
 async function requireSupabaseUser(supabase) {
   const { data, error } = await supabase.auth.getUser();
-  if (error) throw new Error(error.message || "Authentication error.");
+  if (error) throw new Error(parseSupabaseError(error, "Authentication error.", "auth.getUser"));
   const user = data?.user;
   if (!user) throw new Error("You must be signed in to perform this action.");
   return user;
+}
+
+/**
+ * Fetch a Supabase session and ensure it's established.
+ * Uses a short timeout for better UX in blocked-network scenarios.
+ */
+async function requireSupabaseSession(supabase, { timeoutMs = 8000, errorMessage } = {}) {
+  const { data, error } = await withTimeout(
+    supabase.auth.getSession(),
+    timeoutMs,
+    "Timed out while checking authentication session. Please check your network connection and retry."
+  );
+  if (error) throw new Error(parseSupabaseError(error, "Could not verify session.", "auth.getSession"));
+
+  const session = data?.session || null;
+  if (!session) {
+    throw new Error(
+      errorMessage ||
+        "Authentication session not established. Please check your email for verification (if enabled) or try logging in, then retry registration."
+    );
+  }
+  return session;
 }
 
 /**
@@ -325,7 +416,7 @@ async function supaAtomicAcceptRequest(supabase, { requestId, mechanicId, assign
   }
 
   if (!isMissingColumnError(err1)) {
-    throw new Error(friendlySupabaseErrorMessage(err1, "Could not accept this request."));
+    throw new Error(parseSupabaseError(err1, "Could not accept this request.", "requests.update(preferred accept)"));
   }
 
   // Legacy schema: assigned_mechanic_id + assigned_at + status=ASSIGNED; guard on assigned_mechanic_id IS NULL.
@@ -343,7 +434,7 @@ async function supaAtomicAcceptRequest(supabase, { requestId, mechanicId, assign
     .select("*")
     .maybeSingle();
 
-  if (err2) throw new Error(friendlySupabaseErrorMessage(err2, "Could not accept this request."));
+  if (err2) throw new Error(parseSupabaseError(err2, "Could not accept this request.", "requests.update(legacy accept)"));
   return { updated: Boolean(row2), row: row2, used: "legacy" };
 }
 
@@ -365,7 +456,7 @@ async function supaAtomicStartRequest(supabase, { requestId, mechanicId }) {
   if (!err1) return { updated: Boolean(row1), row: row1, used: "preferred" };
 
   if (!isMissingColumnError(err1)) {
-    throw new Error(friendlySupabaseErrorMessage(err1, "Could not start request."));
+    throw new Error(parseSupabaseError(err1, "Could not start request.", "requests.update(preferred start)"));
   }
 
   // Legacy schema: set status to WORKING; cannot enforce previous status due to variant values.
@@ -377,7 +468,7 @@ async function supaAtomicStartRequest(supabase, { requestId, mechanicId }) {
     .select("*")
     .maybeSingle();
 
-  if (err2) throw new Error(friendlySupabaseErrorMessage(err2, "Could not start request."));
+  if (err2) throw new Error(parseSupabaseError(err2, "Could not start request.", "requests.update(legacy start)"));
   return { updated: Boolean(row2), row: row2, used: "legacy" };
 }
 
@@ -399,7 +490,7 @@ async function supaAtomicCompleteRequest(supabase, { requestId, mechanicId, comp
   if (!err1) return { updated: Boolean(row1), row: row1, used: "preferred" };
 
   if (!isMissingColumnError(err1)) {
-    throw new Error(friendlySupabaseErrorMessage(err1, "Could not complete request."));
+    throw new Error(parseSupabaseError(err1, "Could not complete request.", "requests.update(preferred complete)"));
   }
 
   // Legacy schema: status=COMPLETED, attempt completed_at (may or may not exist).
@@ -411,16 +502,8 @@ async function supaAtomicCompleteRequest(supabase, { requestId, mechanicId, comp
     .select("*")
     .maybeSingle();
 
-  if (err2) throw new Error(friendlySupabaseErrorMessage(err2, "Could not complete request."));
+  if (err2) throw new Error(parseSupabaseError(err2, "Could not complete request.", "requests.update(legacy complete)"));
   return { updated: Boolean(row2), row: row2, used: "legacy" };
-}
-
-/** Extract a friendlier UI message from a supabase-js error (best-effort). */
-function friendlySupabaseErrorMessage(err, fallback) {
-  const msg = err?.message || "";
-  if (!msg) return fallback;
-  if (msg.toLowerCase().includes("row level security")) return "Permission denied. Please contact an admin.";
-  return msg;
 }
 
 /** Best-effort: detect if a Postgres column is missing based on error message. */
@@ -446,7 +529,7 @@ async function loadRequestNotes(supabase, requestId) {
       // Table/columns not present in this deployment; caller may fall back.
       return { notes: null, supported: false };
     }
-    throw new Error(friendlySupabaseErrorMessage(error, "Could not load notes."));
+    throw new Error(parseSupabaseError(error, "Could not load notes.", "request_notes.select"));
   }
 
   const normalized = (data || []).map((n) => ({
@@ -472,7 +555,7 @@ async function insertRequestNote(supabase, { requestId, authorRole, noteText }) 
     if (isMissingColumnError(error) || (error.message || "").toLowerCase().includes("relation") || (error.message || "").toLowerCase().includes("schema cache")) {
       return { supported: false };
     }
-    throw new Error(friendlySupabaseErrorMessage(error, "Could not add note."));
+    throw new Error(parseSupabaseError(error, "Could not add note.", "request_notes.insert"));
   }
   return { supported: true };
 }
@@ -488,11 +571,16 @@ export const dataService = {
     /**
      * Registers a new mechanic (Supabase mode only):
      * - Creates a Supabase Auth user (email/password)
+     * - Immediately verifies session via supabase.auth.getSession()
      * - Inserts a `public.profiles` row where:
      *   - id = auth.uid() (must match for RLS)
      *   - role = 'mechanic'
      *   - status = 'pending'
-     *   - approved/approved_at remain unset (admin-only)
+     *
+     * IMPORTANT:
+     * Some Supabase configurations require email confirmation; in that case,
+     * signUp may not produce a session. We must guard profile insert accordingly
+     * and show actionable guidance.
      *
      * SECURITY / RLS ALIGNMENT:
      * - Client must NOT write restricted fields such as: approved=true, approved_at, admin-only columns.
@@ -502,58 +590,80 @@ export const dataService = {
     const supabase = getSupabase();
     if (!supabase) throw new Error("Supabase is not configured.");
 
-    // Create auth user (also signs them in, depending on Supabase auth settings).
-    const { data, error } = await supabase.auth.signUp({ email, password });
-    if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not create account."));
+    try {
+      const { data, error } = await withTimeout(
+        supabase.auth.signUp({ email, password }),
+        15000,
+        "Timed out while creating account. Please check your connection and retry."
+      );
+      if (error) throw new Error(parseSupabaseError(error, "Could not create account.", "auth.signUp"));
 
-    // In some auth configurations, signUp returns no session/user until email confirmation.
-    // RLS-protected profile insert requires an authenticated user (auth.uid()).
-    // We therefore require the user object here; otherwise we cannot insert their profile.
-    const signedUpUser = data?.user;
-    if (!signedUpUser) {
-      throw new Error("Account created, but no session was returned. Please check your email and then sign in.");
-    }
+      // Required by request: always check getSession immediately after signUp.
+      const session = await requireSupabaseSession(supabase, {
+        errorMessage:
+          "Authentication session not established. Please check your email for verification (if enabled) or try logging in, then retry registration.",
+      });
 
-    // Ensure we are using the current authenticated uid (RLS uses auth.uid()).
-    const authed = await requireSupabaseUser(supabase);
-    const uidToUse = authed?.id;
-    if (!uidToUse) throw new Error("Could not determine authenticated user id.");
+      const uidToUse = session?.user?.id;
+      if (!uidToUse) {
+        throw new Error(
+          "Authentication session not established. Please check your email for verification (if enabled) or try logging in, then retry registration."
+        );
+      }
 
-    // Allowed profile fields for mechanic registration (avoid restricted fields).
-    const baseProfilePayload = {
-      id: uidToUse,
-      email,
-      role: "mechanic",
-      status: "pending",
-      // Do NOT send approved/approved_at/approved_by/etc from client.
-      display_name: name,
-      phone: phone || null,
-      service_type: serviceType || null,
-    };
-
-    // Try insert with optional columns first; if schema differs, retry with minimal safe columns.
-    const { error: pErr } = await supabase.from("profiles").insert(baseProfilePayload);
-    if (pErr) {
-      // Retry with only the columns required by RLS + common schema.
-      const minimal = {
+      // Guard: do not attempt profile insert without a user id/session.
+      // Allowed profile fields for mechanic registration (avoid restricted fields).
+      const baseProfilePayload = {
         id: uidToUse,
         email,
         role: "mechanic",
         status: "pending",
+        // Do NOT send approved/approved_at/approved_by/etc from client.
+        display_name: name,
+        phone: phone || null,
+        service_type: serviceType || null,
       };
 
-      const { error: pErr2 } = await supabase.from("profiles").insert(minimal);
-      if (pErr2) throw new Error(friendlySupabaseErrorMessage(pErr2, "Could not create profile."));
-    }
+      // Try insert with optional columns first; if schema differs, retry with minimal safe columns.
+      const { error: pErr } = await withTimeout(
+        supabase.from("profiles").insert(baseProfilePayload),
+        15000,
+        "Timed out while creating your profile. Please retry."
+      );
 
-    return {
-      id: uidToUse,
-      email: authed.email || email,
-      role: "mechanic",
-      approved: false,
-      displayName: name,
-      serviceArea: "",
-    };
+      if (pErr) {
+        // Retry with only the columns required by RLS + common schema.
+        const minimal = {
+          id: uidToUse,
+          email,
+          role: "mechanic",
+          status: "pending",
+        };
+
+        const { error: pErr2 } = await withTimeout(
+          supabase.from("profiles").insert(minimal),
+          15000,
+          "Timed out while creating your profile. Please retry."
+        );
+        if (pErr2) throw new Error(parseSupabaseError(pErr2, "Could not create profile.", "profiles.insert(minimal)"));
+      }
+
+      return {
+        id: uidToUse,
+        email: session?.user?.email || email,
+        role: "mechanic",
+        approved: false,
+        status: "pending",
+        displayName: name,
+        serviceArea: "",
+      };
+    } catch (e) {
+      // Ensure a clean, actionable message bubbles up.
+      const msg =
+        e?.message ||
+        "Registration failed. Authentication session not established. Please check your email for verification (if enabled) or try logging in, then retry registration.";
+      throw new Error(msg);
+    }
   },
 
   // PUBLIC_INTERFACE
@@ -601,7 +711,7 @@ export const dataService = {
       };
 
       const { data, error } = await supabase.from("requests").insert(insertPayload).select().maybeSingle();
-      if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not create request."));
+      if (error) throw new Error(parseSupabaseError(error, "Could not create request.", "requests.insert"));
       if (!data) throw new Error("Failed to insert request.");
 
       const normalized = normalizeRequestRow(data);
@@ -624,8 +734,19 @@ export const dataService = {
     ensureSeedData();
     const supabase = getSupabase();
     if (supabase) {
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) throw new Error(friendlySupabaseErrorMessage(error, "Login failed."));
+      const { data, error } = await withTimeout(
+        supabase.auth.signInWithPassword({ email, password }),
+        15000,
+        "Timed out while signing in. Please check your connection and retry."
+      );
+      if (error) throw new Error(parseSupabaseError(error, "Login failed.", "auth.signInWithPassword"));
+
+      // Required by request: verify session via getSession after signInWithPassword.
+      // (Some misconfigurations can produce a user but no persisted session.)
+      await requireSupabaseSession(supabase, {
+        errorMessage: "Login succeeded but no session was established. Please retry or check Supabase configuration.",
+      });
+
       const user = data.user;
       const roleInfo = await supaGetUserRole(supabase, user.id, user.email);
       return {
@@ -677,6 +798,7 @@ export const dataService = {
         email: user.email,
         role: roleInfo.role,
         approved: roleInfo.approved,
+        status: roleInfo.status,
         displayName: roleInfo.displayName,
         serviceArea: roleInfo.serviceArea,
       };
@@ -726,7 +848,7 @@ export const dataService = {
         .or("mechanic_id.is.null,assigned_mechanic_id.is.null")
         .order("created_at", { ascending: false });
 
-      if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load requests."));
+      if (error) throw new Error(parseSupabaseError(error, "Could not load requests.", "requests.select(unassigned)"));
       return (data || [])
         .map(normalizeRequestRow)
         .filter((r) => !r.assignedMechanicId && normalizeStatus(r.status) === "OPEN");
@@ -767,7 +889,7 @@ export const dataService = {
         .or(`mechanic_id.eq.${effectiveMechanicId},assigned_mechanic_id.eq.${effectiveMechanicId}`)
         .order("created_at", { ascending: false });
 
-      if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load assignments."));
+      if (error) throw new Error(parseSupabaseError(error, "Could not load assignments.", "requests.select(my_assignments)"));
       return (data || []).map(normalizeRequestRow);
     }
 
@@ -780,7 +902,7 @@ export const dataService = {
     const supabase = getSupabase();
     if (supabase) {
       const { data, error } = await supabase.from("requests").select("*").eq("id", requestId).maybeSingle();
-      if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load request."));
+      if (error) throw new Error(parseSupabaseError(error, "Could not load request.", "requests.select(by_id)"));
       if (!data) return null;
 
       const base = normalizeRequestRow(data);
@@ -931,11 +1053,11 @@ export const dataService = {
       } else if (canonical === "ASSIGNED") {
         const { error } = await supabase.from("requests").update({ status: "assigned" }).eq("id", requestId).eq("mechanic_id", mechanicId);
         if (error && !isMissingColumnError(error)) {
-          throw new Error(friendlySupabaseErrorMessage(error, "Could not update status."));
+          throw new Error(parseSupabaseError(error, "Could not update status.", "requests.update(status assigned preferred)"));
         }
         if (error && isMissingColumnError(error)) {
           const { error: e2 } = await supabase.from("requests").update({ status: "ASSIGNED" }).eq("id", requestId).eq("assigned_mechanic_id", mechanicId);
-          if (e2) throw new Error(friendlySupabaseErrorMessage(e2, "Could not update status."));
+          if (e2) throw new Error(parseSupabaseError(e2, "Could not update status.", "requests.update(status assigned legacy)"));
         }
       } else {
         await supaAtomicStartRequest(supabase, { requestId, mechanicId });
@@ -1000,7 +1122,7 @@ export const dataService = {
       };
 
       const { error } = await supabase.from("profiles").update(payload).eq("id", userId);
-      if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not save profile."));
+      if (error) throw new Error(parseSupabaseError(error, "Could not save profile.", "profiles.update"));
       return true;
     }
 

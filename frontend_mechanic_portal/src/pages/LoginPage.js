@@ -5,6 +5,18 @@ import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { dataService } from "../services/dataService";
 
+function guidanceItems({ supa }) {
+  const items = [];
+  if (!supa) {
+    items.push("Supabase is not configured in this environment (mock mode is active).");
+    items.push("To enable real login, set REACT_APP_SUPABASE_URL and REACT_APP_SUPABASE_KEY.");
+  } else {
+    items.push("If you recently registered and email confirmation is enabled, verify your email before logging in.");
+    items.push("If login succeeds but you see a 'no session' message, re-check Supabase URL configuration and site domain allowlist.");
+  }
+  return items;
+}
+
 // PUBLIC_INTERFACE
 export function LoginPage({ onAuthed }) {
   /** Mechanic login page. */
@@ -19,14 +31,25 @@ export function LoginPage({ onAuthed }) {
 
   const [email, setEmail] = useState(defaults.email);
   const [password, setPassword] = useState(defaults.password);
-  const [error, setError] = useState("");
+
+  const [banner, setBanner] = useState({ type: "", title: "", message: "", items: [] });
   const [busy, setBusy] = useState(false);
+
+  const setErrorBanner = (title, message, items = []) =>
+    setBanner({
+      type: "error",
+      title,
+      message,
+      items,
+    });
 
   const submit = async (e) => {
     e.preventDefault();
-    setError("");
-    if (!email.trim()) return setError("Email is required.");
-    if (password.length < 6) return setError("Password must be at least 6 characters.");
+    setBanner({ type: "", title: "", message: "", items: [] });
+
+    if (!email.trim()) return setErrorBanner("Missing email", "Email is required.");
+    if (password.length < 6) return setErrorBanner("Invalid password", "Password must be at least 6 characters.");
+
     setBusy(true);
     try {
       const u = await dataService.login(email.trim(), password);
@@ -45,11 +68,32 @@ export function LoginPage({ onAuthed }) {
         navigate("/dashboard");
       }
     } catch (err) {
-      setError(err.message || "Login failed.");
+      const msg = err?.message || "Login failed.";
+      const extra =
+        msg.toLowerCase().includes("supabase") || msg.toLowerCase().includes("session") || msg.toLowerCase().includes("network")
+          ? guidanceItems({ supa })
+          : [];
+      setErrorBanner("Could not sign in", msg, extra);
     } finally {
       setBusy(false);
     }
   };
+
+  const Banner = banner.type ? (
+    <div className={banner.type === "error" ? "alert alert-error" : "alert alert-info"} style={{ marginBottom: 12 }}>
+      {banner.title ? <div style={{ fontWeight: 900, marginBottom: 4 }}>{banner.title}</div> : null}
+      <div>{banner.message}</div>
+      {banner.items?.length ? (
+        <ul style={{ margin: "8px 0 0", paddingLeft: 18 }}>
+          {banner.items.map((x) => (
+            <li key={x} style={{ margin: "4px 0" }}>
+              {x}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  ) : null;
 
   return (
     <div className="container">
@@ -67,8 +111,10 @@ export function LoginPage({ onAuthed }) {
           </Link>
         }
       >
+        {Banner}
+
         <form className="form" onSubmit={submit}>
-          <Input label="Email" name="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+          <Input label="Email" name="email" value={email} onChange={(e) => setEmail(e.target.value)} required disabled={busy} />
           <Input
             label="Password"
             name="password"
@@ -76,8 +122,9 @@ export function LoginPage({ onAuthed }) {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
+            disabled={busy}
           />
-          {error ? <div className="alert alert-error">{error}</div> : null}
+
           <div className="row">
             <Button type="submit" disabled={busy}>
               {busy ? "Signing in..." : "Sign in"}
@@ -86,6 +133,16 @@ export function LoginPage({ onAuthed }) {
               Need an account? Register →
             </Link>
           </div>
+
+          {supa ? (
+            <div className="hint" style={{ marginTop: 6 }}>
+              Tip: If email confirmation is enabled, you must verify your email before you can fully sign in.
+            </div>
+          ) : (
+            <div className="hint" style={{ marginTop: 6 }}>
+              Mock mode is active. To enable Supabase auth, configure <code>REACT_APP_SUPABASE_URL</code> and <code>REACT_APP_SUPABASE_KEY</code>.
+            </div>
+          )}
         </form>
       </Card>
     </div>
