@@ -259,13 +259,13 @@ async function supaGetUserRole(supabase, userId, email) {
 
 async function supaGetMechanicStatus(supabase, userId) {
   /**
-   * Best-effort fetch from mechanics table, per user_input_ref.
-   * Expected mechanics.status: 'pending' | 'approved' | 'rejected' | 'suspended'
+   * Mechanic approval state is stored in profiles.mechanic_status (per user_input_ref).
+   * Expected values: 'pending' | 'approved' | 'rejected' | 'suspended'
    */
   try {
-    const { data, error } = await supabase.from("mechanics").select("status").eq("user_id", userId).maybeSingle();
+    const { data, error } = await supabase.from("profiles").select("mechanic_status").eq("id", userId).maybeSingle();
     if (error) return null;
-    return data?.status || null;
+    return data?.mechanic_status || null;
   } catch {
     return null;
   }
@@ -315,8 +315,13 @@ export const dataService = {
     /**
      * Registration flow per user_input_ref:
      * 1) Create Supabase auth user
-     * 2) Insert mechanics row with status='pending'
-     * 3) Insert user_roles row with role='mechanic'
+     * 2) Update profiles row to set:
+     *    - role='mechanic'
+     *    - mechanic_status='pending'
+     *    - phone/service_area/specialization
+     * 3) (Optional/best-effort) insert user_roles row with role='mechanic'
+     *
+     * IMPORTANT: Do not reference a `mechanics` table.
      *
      * Mock mode: creates a local user with approved=true (so demo flow still works).
      */
@@ -341,34 +346,41 @@ export const dataService = {
         throw new Error("Account created, but no active session. Please check your email for confirmation, then login.");
       }
 
-      const insertMechanic = {
-        user_id: createdUser.id,
-        full_name: fullName,
-        email,
+      // Ensure there's a profiles row; if your DB already has an auth trigger that creates it,
+      // this insert will likely conflict. We ignore that and proceed to update.
+      try {
+        await supabase.from("profiles").insert({ id: createdUser.id, email: createdUser.email, role: "user" });
+      } catch {
+        // ignore
+      }
+
+      const updatePayload = {
+        role: "mechanic",
+        mechanic_status: "pending",
         phone: phone || null,
         service_area: serviceArea || null,
         specialization: Array.isArray(specialization) && specialization.length ? specialization : null,
-        status: "pending",
       };
 
-      const { error: mechanicError } = await supabase.from("mechanics").insert(insertMechanic);
-      if (mechanicError) throw new Error(friendlySupabaseErrorMessage(mechanicError, "Could not submit mechanic application."));
+      const { error: profileErr } = await supabase.from("profiles").update(updatePayload).eq("id", createdUser.id);
+      if (profileErr) throw new Error(friendlySupabaseErrorMessage(profileErr, "Could not submit mechanic application."));
 
       // Role row (best-effort; ignore duplicates if RLS allows/blocks)
       const { error: roleError } = await supabase.from("user_roles").insert({ user_id: createdUser.id, role: "mechanic" });
       if (roleError && !String(roleError.message || "").toLowerCase().includes("duplicate")) {
-        // Don't hard-fail registration if role insert is blocked; app status still works from mechanics table.
-        // But do surface a helpful message if RLS is preventing it.
+        // Don't hard-fail registration if role insert is blocked; mechanic_status in profiles still drives the app.
         // eslint-disable-next-line no-console
         console.warn("Could not insert user_roles row:", roleError);
       }
 
       const roleInfo = await supaGetUserRole(supabase, createdUser.id, createdUser.email);
+      const mechStatus = await supaGetMechanicStatus(supabase, createdUser.id);
+
       return {
         id: createdUser.id,
         email: createdUser.email,
         role: roleInfo.role || "mechanic",
-        approved: false,
+        approved: mechStatus === "approved",
         profile: roleInfo.profile,
       };
     }
@@ -450,16 +462,18 @@ export const dataService = {
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Login failed."));
       const user = data.user;
 
-      // Role is not the source of truth for mechanic approval; mechanics.status is.
+      // Mechanic approval is stored in profiles.mechanic_status.
       const roleInfo = await supaGetUserRole(supabase, user.id, user.email);
+      const mechStatus = await supaGetMechanicStatus(supabase, user.id);
 
       // Minimal gate: ensure this portal isn't used by a non-mechanic user.
-      // If user_roles is not available due to RLS/schema, we fall back to mechanics table existence.
-      const mechStatus = await supaGetMechanicStatus(supabase, user.id);
+      // We accept either:
+      // - profiles.role === 'mechanic' (or legacy 'approved_mechanic')
+      // - OR mechanic_status present (pending/approved/rejected/suspended)
       const looksLikeMechanic = roleInfo.role === "mechanic" || roleInfo.role === "approved_mechanic" || Boolean(mechStatus);
       if (!looksLikeMechanic) throw new Error("This portal is for mechanics only.");
 
-      // approved flag is retained for backward compatibility with existing UI pieces (mock mode).
+      // approved flag retained for backward compatibility with any UI pieces still checking user.approved.
       return { id: user.id, email: user.email, role: roleInfo.role, approved: mechStatus === "approved", profile: roleInfo.profile };
     }
 

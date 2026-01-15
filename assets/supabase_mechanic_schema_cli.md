@@ -1,11 +1,21 @@
 # Supabase DB schema (Mechanic Portal) — CLI / one-statement commands
 
-This project’s mechanic portal queries two tables that must exist in Supabase:
+This mechanic portal must **NOT** use a `public.mechanics` table.
 
-- `public.mechanics`
-- `public.user_roles`
+Instead, mechanic approval state and profile fields are stored on the existing:
 
-If you see an error like **`public.mechanics table not found in schema cache`**, create the tables and RLS policies below.
+- `public.profiles` (authoritative for mechanic auth + status)
+- `public.user_roles` (optional / best-effort; used as an additional role signal)
+
+The portal expects these `profiles` columns to exist:
+
+- `role` TEXT — `'user' | 'mechanic' | 'admin'`
+- `mechanic_status` TEXT — `'pending' | 'approved' | 'rejected' | 'suspended'`
+- `service_area` TEXT
+- `specialization` TEXT[]
+- `phone` TEXT
+
+If you previously followed older docs that referenced `public.mechanics`, remove/ignore that table and migrate to `profiles.mechanic_status`.
 
 > Important:
 > - Run **each statement one-at-a-time** (each bullet is a single `psql -c "..."` statement).
@@ -30,44 +40,43 @@ psql "postgresql://..." -c "SELECT now();"
 
 ---
 
-## 1) Create `mechanics` table (minimal columns used by the app)
+## 1) Add mechanic fields to `profiles`
 
-The mechanic portal writes/reads:
-- `user_id` (Supabase auth user id)
-- `full_name`, `email`, `phone`
-- `service_area`, `specialization`
-- `status` ∈ `pending|approved|rejected|suspended`
-- timestamps
-
-Run:
+### Add columns (safe if they already exist)
 
 ```bash
-psql "postgresql://..." -c "CREATE TABLE IF NOT EXISTS public.mechanics ( id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL UNIQUE, full_name text NOT NULL, email text NOT NULL, phone text NULL, service_area text NULL, specialization text[] NULL, status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','suspended')), created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), CONSTRAINT mechanics_user_fk FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE );"
+psql "postgresql://..." -c "ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS role text;"
 ```
 
-Index to speed up `.eq('user_id', ...)`:
-
 ```bash
-psql "postgresql://..." -c "CREATE INDEX IF NOT EXISTS mechanics_user_id_idx ON public.mechanics(user_id);"
+psql "postgresql://..." -c "ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS mechanic_status text;"
 ```
 
-(Optional) Updated timestamp helper (kept as one statement):
-
 ```bash
-psql "postgresql://..." -c "CREATE OR REPLACE FUNCTION public.set_updated_at() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.updated_at = now(); RETURN NEW; END; $$;"
+psql "postgresql://..." -c "ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS service_area text;"
 ```
 
-(Optional) Trigger (one statement):
+```bash
+psql "postgresql://..." -c "ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS specialization text[];"
+```
 
 ```bash
-psql "postgresql://..." -c "DROP TRIGGER IF EXISTS set_mechanics_updated_at ON public.mechanics; CREATE TRIGGER set_mechanics_updated_at BEFORE UPDATE ON public.mechanics FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();"
+psql "postgresql://..." -c "ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS phone text;"
+```
+
+### Add basic CHECK constraint for mechanic_status (optional)
+
+> If you already have a constraint name collision, rename it.
+
+```bash
+psql "postgresql://..." -c "DO $$ BEGIN ALTER TABLE public.profiles ADD CONSTRAINT profiles_mechanic_status_check CHECK (mechanic_status IS NULL OR mechanic_status IN ('pending','approved','rejected','suspended')); EXCEPTION WHEN duplicate_object THEN NULL; END $$;"
 ```
 
 ---
 
-## 2) Create `user_roles` table (minimal)
+## 2) Create `user_roles` table (optional)
 
-The mechanic portal attempts to insert:
+The frontend tries to insert:
 - `user_id`
 - `role` (e.g. `mechanic`)
 
@@ -85,81 +94,43 @@ psql "postgresql://..." -c "CREATE INDEX IF NOT EXISTS user_roles_user_id_idx ON
 
 ---
 
-## 3) Enable RLS
+## 3) RLS notes
 
-Enable Row Level Security:
+This portal updates `profiles` during mechanic registration:
 
-```bash
-psql "postgresql://..." -c "ALTER TABLE public.mechanics ENABLE ROW LEVEL SECURITY;"
-```
+- sets `role='mechanic'`
+- sets `mechanic_status='pending'`
+- sets `phone/service_area/specialization`
 
-```bash
-psql "postgresql://..." -c "ALTER TABLE public.user_roles ENABLE ROW LEVEL SECURITY;"
-```
+If your `profiles` table has RLS enabled, you must allow authenticated users to update their own row for these columns.
 
----
+Example policy patterns (adjust to your security model):
 
-## 4) RLS policies: “Authenticated users can read their own mechanic record”
+- Allow SELECT on own profile: `id = auth.uid()`
+- Allow UPDATE on own profile: `id = auth.uid()`
 
-### Allow SELECT on own record
-
-```bash
-psql "postgresql://..." -c "DROP POLICY IF EXISTS mechanics_select_own ON public.mechanics; CREATE POLICY mechanics_select_own ON public.mechanics FOR SELECT TO authenticated USING (user_id = auth.uid());"
-```
-
-### Allow INSERT only for self (supports registration flow)
-
-```bash
-psql "postgresql://..." -c "DROP POLICY IF EXISTS mechanics_insert_self ON public.mechanics; CREATE POLICY mechanics_insert_self ON public.mechanics FOR INSERT TO authenticated WITH CHECK (user_id = auth.uid());"
-```
-
-> Note: Updates (e.g. approving) should typically be done by admins/service-role only.
-> This doc intentionally does NOT grant UPDATE/DELETE to normal authenticated users.
+> Admin approval (changing mechanic_status to 'approved') should typically be done via an admin UI using a service role key or an Edge Function, not from a normal authenticated client.
 
 ---
 
-## 5) (Optional but recommended) RLS policies for `user_roles`
+## 4) Quick sanity checks
 
-The frontend tries to insert `{ user_id: currentUser.id, role: 'mechanic' }`.
-If you want to allow that insert for authenticated users (self only), run:
+Verify `profiles` has needed columns:
 
 ```bash
-psql "postgresql://..." -c "DROP POLICY IF EXISTS user_roles_insert_self ON public.user_roles; CREATE POLICY user_roles_insert_self ON public.user_roles FOR INSERT TO authenticated WITH CHECK (user_id = auth.uid());"
+psql "postgresql://..." -c "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='public' AND table_name='profiles' AND column_name IN ('role','mechanic_status','service_area','specialization','phone');"
 ```
 
-If you want users to be able to read their own roles:
+Verify `user_roles` presence (if used):
 
 ```bash
-psql "postgresql://..." -c "DROP POLICY IF EXISTS user_roles_select_self ON public.user_roles; CREATE POLICY user_roles_select_self ON public.user_roles FOR SELECT TO authenticated USING (user_id = auth.uid());"
-```
-
----
-
-## 6) Quick sanity checks
-
-Verify table presence:
-
-```bash
-psql "postgresql://..." -c "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('mechanics','user_roles');"
-```
-
-Verify RLS:
-
-```bash
-psql "postgresql://..." -c "SELECT relname, relrowsecurity FROM pg_class WHERE relname IN ('mechanics','user_roles');"
-```
-
-List policies:
-
-```bash
-psql "postgresql://..." -c "SELECT schemaname, tablename, policyname, roles, cmd FROM pg_policies WHERE tablename IN ('mechanics','user_roles');"
+psql "postgresql://..." -c "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('user_roles');"
 ```
 
 ---
 
 ## Notes / alignment with the mechanic portal code
 
-The mechanic portal (React) expects:
-- `mechanics.status` to be one of: `pending`, `approved`, `rejected`, `suspended`
-- mechanic lookup by `user_id` equals `auth.uid()` (current signed-in user)
-- user_roles insert is best-effort; failures won't block mechanics table use, but allowing it improves UX.
+- Mechanic application status is read from `profiles.mechanic_status`.
+- Mechanic lookup is by `profiles.id = auth.uid()`.
+- The portal treats `user_roles` as best-effort; approval gating is always based on `profiles.mechanic_status`.
