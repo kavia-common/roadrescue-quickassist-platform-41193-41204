@@ -16,9 +16,9 @@ function copyFor(status) {
   switch (status) {
     case "pending":
       return {
-        title: "Application Pending",
+        title: "Application under review",
         description:
-          "Your mechanic application is currently under review. Our admin team will verify your details and approve your account shortly.",
+          "Thank you for applying. Your information is being reviewed by an administrator. You’ll receive access once your account is verified and approved.",
         tone: "badge badge-amber",
       };
     case "rejected":
@@ -35,8 +35,8 @@ function copyFor(status) {
       };
     default:
       return {
-        title: "No Application Found",
-        description: "You haven't submitted a mechanic application yet. Please register to get started.",
+        title: "No application on file",
+        description: "We couldn’t find a mechanic application for your account. Please register to submit an application for review.",
         tone: "badge",
       };
   }
@@ -87,12 +87,12 @@ export function MechanicPendingPage() {
             }}
           >
             <div className="label" style={{ marginBottom: 6 }}>
-              What happens next?
+              What happens next
             </div>
             <ul style={{ margin: 0, paddingLeft: 18, color: "var(--muted)", fontWeight: 700, lineHeight: 1.7 }}>
-              <li>Our team will review your application</li>
-              <li>Verification typically takes 24–48 hours</li>
-              <li>You’ll be able to access the dashboard once approved</li>
+              <li>An administrator will review your application and verify your information.</li>
+              <li>If additional details are required, you may be contacted.</li>
+              <li>Once approved, you’ll be able to access the dashboard and accept assignments.</li>
             </ul>
           </div>
         ) : null}
