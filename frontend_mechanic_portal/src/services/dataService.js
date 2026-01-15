@@ -257,6 +257,20 @@ async function supaGetUserRole(supabase, userId, email) {
   }
 }
 
+async function supaGetMechanicStatus(supabase, userId) {
+  /**
+   * Best-effort fetch from mechanics table, per user_input_ref.
+   * Expected mechanics.status: 'pending' | 'approved' | 'rejected' | 'suspended'
+   */
+  try {
+    const { data, error } = await supabase.from("mechanics").select("status").eq("user_id", userId).maybeSingle();
+    if (error) return null;
+    return data?.status || null;
+  } catch {
+    return null;
+  }
+}
+
 async function requireSupabaseUser(supabase) {
   const { data, error } = await supabase.auth.getUser();
   if (error) throw new Error(error.message || "Authentication error.");
@@ -279,6 +293,102 @@ function friendlySupabaseErrorMessage(err, fallback) {
  */
 export const dataService = {
   /** Mechanic portal facade: login/logout + request acceptance and status updates. */
+
+  // PUBLIC_INTERFACE
+  async getMechanicStatus(userId) {
+    /** Get mechanic application status ('pending'|'approved'|'rejected'|'suspended') or null if not found. */
+    ensureSeedData();
+    const supabase = getSupabase();
+    if (supabase) {
+      return await supaGetMechanicStatus(supabase, userId);
+    }
+
+    // Mock mode: treat approved flag as the status source of truth.
+    const users = getLocalUsers();
+    const u = users.find((x) => x.id === userId);
+    if (!u) return null;
+    return u.approved ? "approved" : "pending";
+  },
+
+  // PUBLIC_INTERFACE
+  async registerMechanic({ fullName, email, password, phone, serviceArea, specialization }) {
+    /**
+     * Registration flow per user_input_ref:
+     * 1) Create Supabase auth user
+     * 2) Insert mechanics row with status='pending'
+     * 3) Insert user_roles row with role='mechanic'
+     *
+     * Mock mode: creates a local user with approved=true (so demo flow still works).
+     */
+    ensureSeedData();
+    const supabase = getSupabase();
+
+    if (supabase) {
+      const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: { full_name: fullName },
+        },
+      });
+
+      if (signUpError) throw new Error(friendlySupabaseErrorMessage(signUpError, "Registration failed."));
+
+      // In some Supabase configs, user may not be immediately available until email confirmation.
+      // We try both signUpData.user and an explicit getUser fetch.
+      const createdUser = signUpData?.user || (await supabase.auth.getUser())?.data?.user;
+      if (!createdUser?.id) {
+        throw new Error("Account created, but no active session. Please check your email for confirmation, then login.");
+      }
+
+      const insertMechanic = {
+        user_id: createdUser.id,
+        full_name: fullName,
+        email,
+        phone: phone || null,
+        service_area: serviceArea || null,
+        specialization: Array.isArray(specialization) && specialization.length ? specialization : null,
+        status: "pending",
+      };
+
+      const { error: mechanicError } = await supabase.from("mechanics").insert(insertMechanic);
+      if (mechanicError) throw new Error(friendlySupabaseErrorMessage(mechanicError, "Could not submit mechanic application."));
+
+      // Role row (best-effort; ignore duplicates if RLS allows/blocks)
+      const { error: roleError } = await supabase.from("user_roles").insert({ user_id: createdUser.id, role: "mechanic" });
+      if (roleError && !String(roleError.message || "").toLowerCase().includes("duplicate")) {
+        // Don't hard-fail registration if role insert is blocked; app status still works from mechanics table.
+        // But do surface a helpful message if RLS is preventing it.
+        // eslint-disable-next-line no-console
+        console.warn("Could not insert user_roles row:", roleError);
+      }
+
+      const roleInfo = await supaGetUserRole(supabase, createdUser.id, createdUser.email);
+      return {
+        id: createdUser.id,
+        email: createdUser.email,
+        role: roleInfo.role || "mechanic",
+        approved: false,
+        profile: roleInfo.profile,
+      };
+    }
+
+    // Mock mode: create a local mechanic who is auto-approved to keep demo usable.
+    const users = getLocalUsers();
+    const exists = users.some((u) => u.email.toLowerCase() === email.toLowerCase());
+    if (exists) throw new Error("An account with that email already exists.");
+    const newUser = {
+      id: uid("m"),
+      email,
+      password,
+      role: "mechanic",
+      approved: true,
+      profile: { name: fullName, serviceArea: serviceArea || "" },
+    };
+    setLocalUsers([...users, newUser]);
+    setLocalSession({ userId: newUser.id });
+    return { id: newUser.id, email: newUser.email, role: newUser.role, approved: newUser.approved, profile: newUser.profile };
+  },
 
   // PUBLIC_INTERFACE
   async createRequest({ user, vehicle, issueDescription, contact }) {
@@ -339,13 +449,24 @@ export const dataService = {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Login failed."));
       const user = data.user;
+
+      // Role is not the source of truth for mechanic approval; mechanics.status is.
       const roleInfo = await supaGetUserRole(supabase, user.id, user.email);
-      return { id: user.id, email: user.email, role: roleInfo.role, approved: roleInfo.approved, profile: roleInfo.profile };
+
+      // Minimal gate: ensure this portal isn't used by a non-mechanic user.
+      // If user_roles is not available due to RLS/schema, we fall back to mechanics table existence.
+      const mechStatus = await supaGetMechanicStatus(supabase, user.id);
+      const looksLikeMechanic = roleInfo.role === "mechanic" || roleInfo.role === "approved_mechanic" || Boolean(mechStatus);
+      if (!looksLikeMechanic) throw new Error("This portal is for mechanics only.");
+
+      // approved flag is retained for backward compatibility with existing UI pieces (mock mode).
+      return { id: user.id, email: user.email, role: roleInfo.role, approved: mechStatus === "approved", profile: roleInfo.profile };
     }
 
     const users = getLocalUsers();
     const match = users.find((u) => u.email.toLowerCase() === email.toLowerCase() && u.password === password);
     if (!match) throw new Error("Invalid email or password.");
+    if (match.role !== "mechanic" && match.role !== "approved_mechanic") throw new Error("This portal is for mechanics only.");
     setLocalSession({ userId: match.id });
     return { id: match.id, email: match.email, role: match.role, approved: match.approved, profile: match.profile };
   },

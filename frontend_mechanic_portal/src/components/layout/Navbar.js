@@ -3,14 +3,24 @@ import { Link, NavLink, useNavigate } from "react-router-dom";
 import { Button } from "../ui/Button";
 import { dataService } from "../../services/dataService";
 
+function statusChipText(mechanicStatus, user) {
+  // Supabase mode: prefer mechanics.status
+  if (mechanicStatus) return mechanicStatus === "approved" ? "Approved" : mechanicStatus === "pending" ? "Pending approval" : mechanicStatus;
+
+  // Mock mode fallback: existing user.approved boolean
+  if (user?.approved === true) return "Approved";
+  if (user) return "Pending approval";
+  return "";
+}
+
 // PUBLIC_INTERFACE
-export function Navbar({ user }) {
+export function Navbar({ user, mechanicStatus }) {
   /** Mechanic portal top navigation. */
   const navigate = useNavigate();
 
   const onLogout = async () => {
     await dataService.logout();
-    navigate("/login");
+    navigate("/auth");
   };
 
   return (
@@ -42,7 +52,7 @@ export function Navbar({ user }) {
         <div className="nav-right">
           {user ? (
             <>
-              <span className="chip">{user.approved ? "Approved" : "Pending approval"}</span>
+              <span className="chip">{statusChipText(mechanicStatus, user)}</span>
               <Button variant="ghost" onClick={onLogout}>
                 Log out
               </Button>
