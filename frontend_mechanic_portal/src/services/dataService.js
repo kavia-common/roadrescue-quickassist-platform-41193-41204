@@ -245,15 +245,23 @@ function normalizeRequestRow(r) {
 
 async function supaGetUserRole(supabase, userId, email) {
   try {
-    const { data, error } = await supabase.from("profiles").select("role,approved,profile").eq("id", userId).maybeSingle();
-    if (error) return { role: "user", approved: true, profile: null };
+    // NOTE: Mechanic approval is NOT the `approved` boolean (legacy); it is `mechanic_status`.
+    // Keep reading role/profile, but do not infer approval from here.
+    const { data, error } = await supabase.from("profiles").select("role,profile").eq("id", userId).maybeSingle();
+    if (error) return { role: "user", profile: null };
     if (!data) {
-      await supabase.from("profiles").insert({ id: userId, email, role: "user", approved: true });
-      return { role: "user", approved: true, profile: null };
+      // Best-effort: many setups have a DB trigger that creates profiles row.
+      // If insert is blocked (RLS), we still proceed and let later calls fail with a friendly error.
+      try {
+        await supabase.from("profiles").insert({ id: userId, email, role: "user" });
+      } catch {
+        // ignore
+      }
+      return { role: "user", profile: null };
     }
-    return { role: data.role || "user", approved: data.approved ?? true, profile: data.profile || null };
+    return { role: data.role || "user", profile: data.profile || null };
   } catch {
-    return { role: "user", approved: true, profile: null };
+    return { role: "user", profile: null };
   }
 }
 
@@ -313,9 +321,9 @@ export const dataService = {
   // PUBLIC_INTERFACE
   async registerMechanic({ fullName, email, password, phone, serviceArea, specialization }) {
     /**
-     * Registration flow per user_input_ref:
+     * Registration flow per user_input_ref (mechanic portal):
      * 1) Create Supabase auth user
-     * 2) Update profiles row to set:
+     * 2) Ensure/update profiles row to set:
      *    - role='mechanic'
      *    - mechanic_status='pending'
      *    - phone/service_area/specialization
@@ -329,10 +337,14 @@ export const dataService = {
     const supabase = getSupabase();
 
     if (supabase) {
+      const siteUrl = process.env.REACT_APP_FRONTEND_URL || process.env.REACT_APP_SITE_URL || "";
+
       const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
         email,
         password,
         options: {
+          // Best-effort redirect for email confirmations (if enabled on project).
+          ...(siteUrl ? { emailRedirectTo: siteUrl } : {}),
           data: { full_name: fullName },
         },
       });
@@ -354,6 +366,7 @@ export const dataService = {
         // ignore
       }
 
+      // Authoritative mechanic fields live on `profiles` (per assets/supabase_mechanic_schema_cli.md).
       const updatePayload = {
         role: "mechanic",
         mechanic_status: "pending",
@@ -366,13 +379,17 @@ export const dataService = {
       if (profileErr) throw new Error(friendlySupabaseErrorMessage(profileErr, "Could not submit mechanic application."));
 
       // Role row (best-effort; ignore duplicates if RLS allows/blocks)
-      const { error: roleError } = await supabase.from("user_roles").insert({ user_id: createdUser.id, role: "mechanic" });
-      if (roleError && !String(roleError.message || "").toLowerCase().includes("duplicate")) {
-        // Don't hard-fail registration if role insert is blocked; mechanic_status in profiles still drives the app.
-        // eslint-disable-next-line no-console
-        console.warn("Could not insert user_roles row:", roleError);
+      try {
+        const { error: roleError } = await supabase.from("user_roles").insert({ user_id: createdUser.id, role: "mechanic" });
+        if (roleError && !String(roleError.message || "").toLowerCase().includes("duplicate")) {
+          // eslint-disable-next-line no-console
+          console.warn("Could not insert user_roles row:", roleError);
+        }
+      } catch {
+        // ignore
       }
 
+      // Ensure returned user is treated as a mechanic and is NOT approved until mechanic_status says approved.
       const roleInfo = await supaGetUserRole(supabase, createdUser.id, createdUser.email);
       const mechStatus = await supaGetMechanicStatus(supabase, createdUser.id);
 
@@ -466,15 +483,20 @@ export const dataService = {
       const roleInfo = await supaGetUserRole(supabase, user.id, user.email);
       const mechStatus = await supaGetMechanicStatus(supabase, user.id);
 
-      // Minimal gate: ensure this portal isn't used by a non-mechanic user.
-      // We accept either:
-      // - profiles.role === 'mechanic' (or legacy 'approved_mechanic')
-      // - OR mechanic_status present (pending/approved/rejected/suspended)
+      // Gate 1: this portal is mechanics-only.
       const looksLikeMechanic = roleInfo.role === "mechanic" || roleInfo.role === "approved_mechanic" || Boolean(mechStatus);
       if (!looksLikeMechanic) throw new Error("This portal is for mechanics only.");
 
-      // approved flag retained for backward compatibility with any UI pieces still checking user.approved.
-      return { id: user.id, email: user.email, role: roleInfo.role, approved: mechStatus === "approved", profile: roleInfo.profile };
+      // Gate 2 (per user request): mechanic can login but cannot access portal pages until admin approval.
+      // We still return the user object so UI can route to /pending and show status,
+      // but `RequireAuth` blocks dashboard access unless mechanicStatus === 'approved'.
+      return {
+        id: user.id,
+        email: user.email,
+        role: roleInfo.role,
+        approved: mechStatus === "approved",
+        profile: roleInfo.profile,
+      };
     }
 
     const users = getLocalUsers();
@@ -503,8 +525,18 @@ export const dataService = {
       const { data } = await supabase.auth.getUser();
       const user = data?.user;
       if (!user) return null;
+
       const roleInfo = await supaGetUserRole(supabase, user.id, user.email);
-      return { id: user.id, email: user.email, role: roleInfo.role, approved: roleInfo.approved, profile: roleInfo.profile };
+      const mechStatus = await supaGetMechanicStatus(supabase, user.id);
+
+      // Approval gating is ALWAYS based on mechanic_status (per schema doc / user_input_ref).
+      return {
+        id: user.id,
+        email: user.email,
+        role: roleInfo.role,
+        approved: mechStatus === "approved",
+        profile: roleInfo.profile,
+      };
     }
 
     const session = getLocalSession();

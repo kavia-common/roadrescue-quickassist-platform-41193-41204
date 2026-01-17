@@ -8,6 +8,14 @@ The mechanic portal can run in:
 See the user website `assets/supabase.md` for recommended `profiles`, `requests`, and `fees` tables.
 
 Mechanic-specific usage:
+- writes mechanic signup to `profiles` with:
+  - `role = 'mechanic'`
+  - `mechanic_status = 'pending'` (approval-gated access)
+  - `phone`, `service_area`, `specialization`
+- reads mechanic approval from `profiles.mechanic_status`:
+  - only `approved` can access dashboard/routes
+  - `pending/rejected/suspended` are routed to the pending page
+- admin visibility: admins can list mechanics by querying `profiles` where `role='mechanic'` (and inspect `mechanic_status`)
 - reads unassigned requests (`assigned_mechanic_id is null`)
 - accepts a request (sets `assigned_mechanic_id`, `assigned_mechanic_email`, `status`)
 - updates request status and appends to `notes`
