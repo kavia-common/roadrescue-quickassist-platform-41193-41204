@@ -834,7 +834,24 @@ export const dataService = {
     ensureSeedData();
     const supabase = getSupabase();
     if (supabase) {
-      const { error } = await supabase.from("profiles").update({ profile }).eq("id", userId);
+      /**
+       * IMPORTANT (mechanic portal security/business rule):
+       * Any profile update initiated from the mechanic portal must keep the account:
+       * - role='mechanic'
+       * - mechanic_status='pending'
+       *
+       * This prevents accidental/malicious drift of role/status through "update profile" flows,
+       * and ensures approvals remain admin-only.
+       */
+      const { error } = await supabase
+        .from("profiles")
+        .update({
+          profile,
+          role: "mechanic",
+          mechanic_status: "pending",
+        })
+        .eq("id", userId);
+
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not save profile."));
       return true;
     }
@@ -842,7 +859,9 @@ export const dataService = {
     const users = getLocalUsers();
     const idx = users.findIndex((u) => u.id === userId);
     if (idx < 0) throw new Error("User not found.");
-    users[idx] = { ...users[idx], profile };
+
+    // Mock mode: keep the mechanic identity consistent as well.
+    users[idx] = { ...users[idx], role: "mechanic", approved: users[idx].approved === true, profile };
     setLocalUsers(users);
     return true;
   },
