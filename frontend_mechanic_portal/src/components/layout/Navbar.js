@@ -18,7 +18,25 @@ export function Navbar({ user, mechanicStatus }) {
   /** Mechanic portal top navigation. */
   const navigate = useNavigate();
 
+  // PUBLIC_INTERFACE
   const onLogout = async () => {
+    // Respect Supabase mode: signOut with redirect if configured
+    if (dataService.isSupabaseConfigured()) {
+      // signOut (redirect back to homepage or auth)
+      const siteUrl = process.env.REACT_APP_FRONTEND_URL || process.env.REACT_APP_SITE_URL || window.location.origin;
+      const { createClient } = await import("@supabase/supabase-js");
+      const supa = createClient(
+        process.env.REACT_APP_SUPABASE_URL,
+        process.env.REACT_APP_SUPABASE_KEY
+      );
+      // signOut supports redirectTo for OIDC/session clean
+      await supa.auth.signOut({ redirectTo: siteUrl + "/auth" });
+      // The redirect will occur, but act as fallback
+      setTimeout(() => {
+        navigate("/auth");
+      }, 100);
+      return;
+    }
     await dataService.logout();
     navigate("/auth");
   };

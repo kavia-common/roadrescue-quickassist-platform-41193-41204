@@ -29,12 +29,14 @@ export function MechanicAuthPage() {
   // Login form
   const [loginEmail, setLoginEmail] = useState("mech@example.com");
   const [loginPassword, setLoginPassword] = useState("password123");
+  const [showLoginPw, setShowLoginPw] = useState(false);
 
   // Register form
   const [fullName, setFullName] = useState("");
   const [regEmail, setRegEmail] = useState("");
   const [phone, setPhone] = useState("");
   const [regPassword, setRegPassword] = useState("");
+  const [showRegPw, setShowRegPw] = useState(false);
   const [serviceArea, setServiceArea] = useState("");
   const [specialization, setSpecialization] = useState([]);
 
@@ -153,14 +155,43 @@ export function MechanicAuthPage() {
         {mode === "login" ? (
           <form className="form" onSubmit={onLogin}>
             <Input label="Email" name="loginEmail" value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} required />
-            <Input
-              label="Password"
-              name="loginPassword"
-              type="password"
-              value={loginPassword}
-              onChange={(e) => setLoginPassword(e.target.value)}
-              required
-            />
+            <div style={{ position: "relative" }}>
+              <Input
+                label="Password"
+                name="loginPassword"
+                type={showLoginPw ? "text" : "password"}
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                required
+              />
+              <button
+                type="button"
+                aria-label={showLoginPw ? "Hide password" : "Show password"}
+                className="btn btn-ghost"
+                style={{
+                  position: "absolute",
+                  top: 28,
+                  right: 10,
+                  background: "none",
+                  border: "none",
+                  padding: 0,
+                  cursor: "pointer",
+                  fontSize: 20,
+                  opacity: 0.73,
+                  zIndex: 2
+                }}
+                tabIndex={0}
+                onClick={() => setShowLoginPw((v) => !v)}
+              >
+                {showLoginPw ? (
+                  // Eye-off SVG
+                  <svg width="22" height="22" fill="none" stroke="currentColor" viewBox="0 0 22 22"><path d="M1 1l20 20M17.8 17.8C15.2 19.2 13.4 19.9 11 19.9c-6 0-9-6-9-6 .93-1.75 2.07-3.2 3.47-4.38M9.3 9.3a2 2 0 0 1 3.4 2.34"/></svg>
+                ) : (
+                  // Eye SVG
+                  <svg width="22" height="22" fill="none" stroke="currentColor" viewBox="0 0 22 22"><circle cx="11" cy="11" r="3.5"/><path d="M1 11S5 4 11 4s10 7 10 7-4 7-10 7S1 11 1 11z"/></svg>
+                )}
+              </button>
+            </div>
 
             <div className="row">
               <Button type="submit" disabled={busy}>
@@ -176,15 +207,44 @@ export function MechanicAuthPage() {
             <Input label="Full name" name="fullName" value={fullName} onChange={(e) => setFullName(e.target.value)} required />
             <Input label="Email" name="regEmail" value={regEmail} onChange={(e) => setRegEmail(e.target.value)} required />
             <Input label="Phone" name="phone" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Optional" />
-            <Input
-              label="Password"
-              name="regPassword"
-              type="password"
-              value={regPassword}
-              onChange={(e) => setRegPassword(e.target.value)}
-              required
-              hint="Minimum 6 characters"
-            />
+            <div style={{ position: "relative" }}>
+              <Input
+                label="Password"
+                name="regPassword"
+                type={showRegPw ? "text" : "password"}
+                value={regPassword}
+                onChange={(e) => setRegPassword(e.target.value)}
+                required
+                hint="Minimum 6 characters"
+              />
+              <button
+                type="button"
+                aria-label={showRegPw ? "Hide password" : "Show password"}
+                className="btn btn-ghost"
+                style={{
+                  position: "absolute",
+                  top: 28,
+                  right: 10,
+                  background: "none",
+                  border: "none",
+                  padding: 0,
+                  cursor: "pointer",
+                  fontSize: 20,
+                  opacity: 0.73,
+                  zIndex: 2
+                }}
+                tabIndex={0}
+                onClick={() => setShowRegPw((v) => !v)}
+              >
+                {showRegPw ? (
+                  // Eye-off SVG
+                  <svg width="22" height="22" fill="none" stroke="currentColor" viewBox="0 0 22 22"><path d="M1 1l20 20M17.8 17.8C15.2 19.2 13.4 19.9 11 19.9c-6 0-9-6-9-6 .93-1.75 2.07-3.2 3.47-4.38M9.3 9.3a2 2 0 0 1 3.4 2.34"/></svg>
+                ) : (
+                  // Eye SVG
+                  <svg width="22" height="22" fill="none" stroke="currentColor" viewBox="0 0 22 22"><circle cx="11" cy="11" r="3.5"/><path d="M1 11S5 4 11 4s10 7 10 7-4 7-10 7S1 11 1 11z"/></svg>
+                )}
+              </button>
+            </div>
             <Input label="Service area" name="serviceArea" value={serviceArea} onChange={(e) => setServiceArea(e.target.value)} placeholder="Optional" />
 
             <div className="field">
