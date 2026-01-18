@@ -49,7 +49,8 @@ function ensureSeedData() {
       vehicle: { make: "Toyota", model: "Corolla", year: "2016", plate: "ABC-123" },
       issueDescription: "Car won't start, clicking noise.",
       contact: { name: "Sam Driver", phone: "555-0101" },
-      status: "Submitted",
+      // DB-aligned canonical token
+      status: "open",
       assignedMechanicId: null,
       assignedMechanicEmail: null,
       notes: [],
@@ -599,7 +600,7 @@ export const dataService = {
     }
 
     const all = getLocalRequests();
-    return all.filter((r) => !r.assignedMechanicId && (r.status === "Submitted" || r.status === "In Review"));
+    return all.filter((r) => !r.assignedMechanicId && normalizeStatus(r.status) === "open");
   },
 
   // PUBLIC_INTERFACE
@@ -709,7 +710,8 @@ export const dataService = {
         .update({
           assigned_mechanic_id: mechanicId,
           assigned_mechanic_email: mechanicEmail,
-          status: "Assigned",
+          // DB CHECK constraint allows ONLY lowercase tokens
+          status: "assigned",
           notes: [...(existing?.notes || []), note],
         })
         .eq("id", requestId)
@@ -778,7 +780,7 @@ export const dataService = {
       ...r,
       assignedMechanicId: mechanic.id,
       assignedMechanicEmail: mechanic.email,
-      status: "Assigned",
+      status: "assigned",
       notes: [...(r.notes || []), note],
     };
     setLocalRequests(all);

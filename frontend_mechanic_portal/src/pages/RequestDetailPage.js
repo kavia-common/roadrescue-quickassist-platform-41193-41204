@@ -31,9 +31,9 @@ export function RequestDetailPage({ user }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  // Allowed statuses for mechanics to set.
-  // IMPORTANT: DB constraint requires exact casing for Assigned.
-  const allowedStatuses = useMemo(() => ["Assigned", "EN_ROUTE", "WORKING", "COMPLETED"], []);
+  // Allowed statuses for mechanics to set (DB-aligned lowercase tokens only).
+  // UI labels are derived via statusLabel().
+  const allowedStatuses = useMemo(() => ["assigned", "completed", "canceled"], []);
 
   const load = async () => {
     setError("");
@@ -204,7 +204,7 @@ export function RequestDetailPage({ user }) {
         <div className="row">
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             {allowedStatuses.map((s) => (
-              <Button key={s} variant={s === "COMPLETED" ? "secondary" : "primary"} onClick={() => setStatus(s)} disabled={busy}>
+              <Button key={s} variant={s === "completed" ? "secondary" : "primary"} onClick={() => setStatus(s)} disabled={busy}>
                 Set: {statusLabel(s)}
               </Button>
             ))}

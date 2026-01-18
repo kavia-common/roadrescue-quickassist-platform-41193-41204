@@ -2,52 +2,72 @@
  * Shared request status utilities (Mechanic Portal).
  *
  * IMPORTANT:
- * The Supabase DB for `requests.status` is guarded by a CHECK constraint that expects
- * exact allowed string values. For "accepted" requests, the allowed value is:
- *   - "Assigned" (capital A, rest lowercase)
+ * The `requests.status` column is guarded by a DB CHECK constraint that allows ONLY
+ * these lowercase tokens:
+ *   - "open"
+ *   - "assigned"
+ *   - "completed"
+ *   - "canceled"
  *
- * Therefore, this portal:
- * - Writes "Assigned" when accepting a request
- * - Treats variants like "ASSIGNED" / "accepted" as equivalent when *reading*
- * - Uses friendly labels/badges derived from normalized values
+ * This module enforces that:
+ * - All writes use ONLY the above lowercase tokens.
+ * - Any legacy/incorrect incoming values are normalized into one of these tokens.
+ * - UI can display title-cased labels, but stored values remain lowercase tokens.
  */
 
 /**
  * PUBLIC_INTERFACE
  */
 export function normalizeStatus(rawStatus) {
-  /** Normalize any incoming status (db/UI/legacy) into a canonical token used by this app. */
-  if (!rawStatus) return "Open";
+  /** Normalize any incoming status (db/UI/legacy) into one of: open/assigned/completed/canceled. */
+  if (rawStatus === null || rawStatus === undefined) return "open";
+
   const s = String(rawStatus).trim();
-  if (!s) return "Open";
+  if (!s) return "open";
 
-  // Normalize common legacy/UI variants
-  const upper = s.toUpperCase();
+  const lower = s.toLowerCase().trim();
 
-  // Handle spaced title-case values used in UI ("In Review", "En Route", etc.)
-  const compact = upper.replace(/\s+/g, "_");
-
+  // Common legacy/UI variants -> canonical tokens
+  // NOTE: We intentionally accept a broad set of historical values on READ to keep
+  // older seeded/mock data and older DB rows from breaking the UI. On WRITE we
+  // only output the four allowed tokens.
   const map = {
-    // Open variants
-    OPEN: "Open",
-    SUBMITTED: "Open",
-    IN_REVIEW: "Open",
+    // open
+    open: "open",
+    submitted: "open",
+    "in review": "open",
+    in_review: "open",
+    pending: "open",
 
-    // Assigned/accepted variants (DB allowed value is Title Case "Assigned")
-    ASSIGNED: "Assigned",
-    ACCEPTED: "Assigned",
+    // assigned
+    assigned: "assigned",
+    accepted: "assigned",
+    "en route": "assigned",
+    en_route: "assigned",
+    working: "assigned",
+    in_progress: "assigned",
 
-    // In-flight work
-    EN_ROUTE: "EN_ROUTE",
-    WORKING: "WORKING",
-    IN_PROGRESS: "WORKING",
+    // completed
+    completed: "completed",
+    closed: "completed",
+    done: "completed",
 
-    // Completion
-    COMPLETED: "COMPLETED",
-    CLOSED: "COMPLETED",
+    // canceled
+    canceled: "canceled",
+    cancelled: "canceled",
+    cancel: "canceled",
+    canceled_by_user: "canceled",
+    canceled_by_mechanic: "canceled",
   };
 
-  return map[compact] || map[upper] || s;
+  if (map[lower]) return map[lower];
+
+  // Also handle uppercase snake-cased legacy values like "EN_ROUTE"
+  const compact = lower.replace(/\s+/g, "_");
+  if (map[compact]) return map[compact];
+
+  // Unknown status: default safely to open (keeps UI consistent and avoids bad writes).
+  return "open";
 }
 
 /**
@@ -58,14 +78,13 @@ export function statusLabel(rawStatus) {
   const canonical = normalizeStatus(rawStatus);
 
   const labels = {
-    Open: "Open",
-    Assigned: "Assigned",
-    EN_ROUTE: "En Route",
-    WORKING: "Working",
-    COMPLETED: "Completed",
+    open: "Open",
+    assigned: "Assigned",
+    completed: "Completed",
+    canceled: "Canceled",
   };
 
-  return labels[canonical] || String(canonical).replace(/_/g, " ");
+  return labels[canonical] || "Open";
 }
 
 /**
@@ -76,12 +95,19 @@ export function statusBadgeClass(rawStatus) {
   const canonical = normalizeStatus(rawStatus);
 
   const map = {
-    Open: "badge badge-blue",
-    Assigned: "badge badge-blue",
-    EN_ROUTE: "badge badge-amber",
-    WORKING: "badge badge-amber",
-    COMPLETED: "badge badge-green",
+    open: "badge badge-blue",
+    assigned: "badge badge-amber",
+    completed: "badge badge-green",
+    canceled: "badge",
   };
 
   return map[canonical] || "badge";
+}
+
+/**
+ * PUBLIC_INTERFACE
+ */
+export function toDbStatus(value) {
+  /** Convert any UI/legacy status input into a DB-safe lowercase token for writes. */
+  return normalizeStatus(value);
 }
