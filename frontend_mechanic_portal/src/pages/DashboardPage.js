@@ -1,11 +1,24 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useMemo } from "react";
 import { Link } from "react-router-dom";
 import { Card } from "../components/ui/Card";
 import { Table } from "../components/ui/Table";
 import { Button } from "../components/ui/Button";
+import { Input } from "../components/ui/Input";
 import { dataService } from "../services/dataService";
-import { statusBadgeClass, statusLabel } from "../services/statusUtils";
+import { statusBadgeClass, statusLabel, normalizeStatus } from "../services/statusUtils";
 import { subscribeRequestsChanged } from "../services/requestEvents";
+
+/*
+ * Statuses supported for filter dropdown
+ */
+const STATUS_OPTIONS = [
+  { value: "", label: "All Statuses" },
+  { value: "OPEN", label: "Open" },
+  { value: "ASSIGNED", label: "Assigned" },
+  { value: "EN_ROUTE", label: "En Route" },
+  { value: "WORKING", label: "Working" },
+  { value: "COMPLETED", label: "Completed" },
+];
 
 function statusBadge(status) {
   return <span className={statusBadgeClass(status)}>{statusLabel(status)}</span>;
@@ -20,10 +33,12 @@ function renderVehicleCell(vehicle) {
 
 // PUBLIC_INTERFACE
 export function DashboardPage({ user }) {
-  /** Shows all requests with accurate status labels; mechanics can accept OPEN/unassigned ones. */
+  /** Shows all requests with accurate status labels; mechanics can accept OPEN/unassigned ones. Includes search & status filtering with realtime update. */
   const [rows, setRows] = useState([]);
   const [error, setError] = useState("");
   const [busyId, setBusyId] = useState("");
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
 
   const load = async () => {
     setError("");
@@ -54,6 +69,29 @@ export function DashboardPage({ user }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Filtered and searched rows - memoized
+  const filteredRows = useMemo(() => {
+    let filtered = rows;
+
+    if (statusFilter) {
+      filtered = filtered.filter(
+        (r) => normalizeStatus(r.status) === statusFilter
+      );
+    }
+
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      filtered = filtered.filter((r) =>
+        [r.id, r.userEmail, r.vehicle?.make, r.vehicle?.model, r.vehicle?.plate, r.assignedMechanicEmail]
+          .filter(Boolean)
+          .map((s) => String(s).toLowerCase())
+          .some((s) => s.includes(q))
+      );
+    }
+
+    return filtered;
+  }, [rows, search, statusFilter]);
 
   const accept = async (id) => {
     setBusyId(id);
@@ -87,12 +125,53 @@ export function DashboardPage({ user }) {
         </div>
       ) : null}
 
-      <Card title="Requests" subtitle="Statuses update in realtime. You can only accept OPEN + unassigned requests.">
+      <Card
+        title="Requests"
+        subtitle="Statuses update in realtime. You can only accept OPEN + unassigned requests."
+        actions={
+          <div style={{ display: "flex", gap: 10, alignItems: "end" }}>
+            <div>
+              <Input
+                name="dashboard-search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="🔍 Search by ID, email, vehicle, plate"
+              />
+            </div>
+            <div>
+              <select
+                className="input"
+                style={{ minWidth: 140 }}
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+              >
+                {STATUS_OPTIONS.map((opt) => (
+                  <option value={opt.value} key={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        }
+      >
         {error ? <div className="alert alert-error">{error}</div> : null}
         <Table
           columns={[
-            { key: "id", header: "Request", render: (r) => <Link className="link" to={`/requests/${r.id}`}>{r.id.slice(0, 8)}</Link> },
-            { key: "createdAt", header: "Created", render: (r) => (r.createdAt ? new Date(r.createdAt).toLocaleString() : "—") },
+            {
+              key: "id",
+              header: "Request",
+              render: (r) => (
+                <Link className="link" to={`/requests/${r.id}`}>
+                  {r.id.slice(0, 8)}
+                </Link>
+              ),
+            },
+            {
+              key: "createdAt",
+              header: "Created",
+              render: (r) => (r.createdAt ? new Date(r.createdAt).toLocaleString() : "—"),
+            },
             {
               key: "vehicle",
               header: "Vehicle",
@@ -108,7 +187,7 @@ export function DashboardPage({ user }) {
               key: "action",
               header: "Action",
               render: (r) => {
-                const canAccept = r.status === "OPEN" && !r.assignedMechanicId && user?.approved;
+                const canAccept = normalizeStatus(r.status) === "OPEN" && !r.assignedMechanicId && user?.approved;
                 if (!canAccept) return <span className="hint">—</span>;
                 return (
                   <Button size="sm" onClick={() => accept(r.id)} disabled={busyId === r.id}>
@@ -118,7 +197,7 @@ export function DashboardPage({ user }) {
               },
             },
           ]}
-          rows={rows}
+          rows={filteredRows}
           rowKey={(r) => r.id}
         />
       </Card>
