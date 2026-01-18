@@ -20,7 +20,7 @@ function renderVehicleCell(vehicle) {
 
 // PUBLIC_INTERFACE
 export function DashboardPage({ user }) {
-  /** Shows available requests; mechanics can accept them. */
+  /** Shows all requests with accurate status labels; mechanics can accept OPEN/unassigned ones. */
   const [rows, setRows] = useState([]);
   const [error, setError] = useState("");
   const [busyId, setBusyId] = useState("");
@@ -28,7 +28,7 @@ export function DashboardPage({ user }) {
   const load = async () => {
     setError("");
     try {
-      const list = await dataService.listUnassignedRequests();
+      const list = await dataService.listAllRequests();
       setRows(list);
     } catch (e) {
       setError(e.message || "Could not load requests.");
@@ -65,9 +65,6 @@ export function DashboardPage({ user }) {
       // acceptRequest returns updated request (Supabase + mock) for instant UI feedback
       await dataService.acceptRequest({ requestId: id, mechanic: user });
 
-      // Optimistic local refresh: remove from "Available" list immediately.
-      setRows((prev) => prev.filter((r) => r.id !== id));
-
       // Then reload for canonical truth (handles race/other accepts).
       await load();
     } catch (e) {
@@ -81,35 +78,44 @@ export function DashboardPage({ user }) {
     <div className="container">
       <div className="hero">
         <h1 className="h1">Dashboard</h1>
-        <p className="lead">Available requests awaiting a mechanic.</p>
+        <p className="lead">All breakdown requests with live status (Open / Assigned / Completed).</p>
       </div>
 
       {!user.approved ? (
         <div className="alert alert-info">
-          Your account is <strong>pending admin approval</strong>. You can browse available requests, but you cannot accept assignments until you are approved.
+          Your account is <strong>pending admin approval</strong>. You can browse requests, but you cannot accept assignments until you are approved.
         </div>
       ) : null}
 
-      <Card title="Available requests" subtitle="Accept to move into My Assignments.">
+      <Card title="Requests" subtitle="Statuses update in realtime. You can only accept OPEN + unassigned requests.">
         {error ? <div className="alert alert-error">{error}</div> : null}
         <Table
           columns={[
             { key: "id", header: "Request", render: (r) => <Link className="link" to={`/requests/${r.id}`}>{r.id.slice(0, 8)}</Link> },
-            { key: "createdAt", header: "Created", render: (r) => new Date(r.createdAt).toLocaleString() },
+            { key: "createdAt", header: "Created", render: (r) => (r.createdAt ? new Date(r.createdAt).toLocaleString() : "—") },
             {
               key: "vehicle",
               header: "Vehicle",
               render: (r) => renderVehicleCell(r.vehicle),
             },
+            {
+              key: "assignedMechanicEmail",
+              header: "Assigned To",
+              render: (r) => r.assignedMechanicEmail || "—",
+            },
             { key: "status", header: "Status", render: (r) => statusBadge(r.status) },
             {
               key: "action",
               header: "Action",
-              render: (r) => (
-                <Button size="sm" onClick={() => accept(r.id)} disabled={busyId === r.id}>
-                  {busyId === r.id ? "Accepting..." : "Accept"}
-                </Button>
-              ),
+              render: (r) => {
+                const canAccept = r.status === "OPEN" && !r.assignedMechanicId && user?.approved;
+                if (!canAccept) return <span className="hint">—</span>;
+                return (
+                  <Button size="sm" onClick={() => accept(r.id)} disabled={busyId === r.id}>
+                    {busyId === r.id ? "Accepting..." : "Accept"}
+                  </Button>
+                );
+              },
             },
           ]}
           rows={rows}

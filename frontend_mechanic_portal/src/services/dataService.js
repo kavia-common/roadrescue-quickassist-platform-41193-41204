@@ -214,8 +214,17 @@ function normalizeRequestRow(r) {
     vehicle: normalizeVehicle(r),
     issueDescription: r.issue_description ?? r.issueDescription ?? "",
     contact: normalizeContact(r),
+
     // IMPORTANT: keep status canonical across apps
-    status: normalizeStatus(r.status ?? ""),
+    // We also support status being absent and inferring from assignment where needed.
+    status: normalizeStatus(
+      typeof r.status !== "undefined" && r.status !== null && String(r.status).trim() !== ""
+        ? r.status
+        : r.assigned_mechanic_id || r.assignedMechanicId
+          ? "ASSIGNED"
+          : "OPEN"
+    ),
+
     assignedMechanicId: r.assigned_mechanic_id ?? r.assignedMechanicId ?? null,
     assignedMechanicEmail: r.assigned_mechanic_email ?? r.assignedMechanicEmail ?? null,
     notes: r.notes || [],
@@ -594,6 +603,32 @@ export const dataService = {
   },
 
   // PUBLIC_INTERFACE
+  async listAllRequests() {
+    /**
+     * List all breakdown requests for dashboard visibility, with canonical status mapping:
+     * - OPEN: unassigned / new
+     * - ASSIGNED (+ in-flight statuses like EN_ROUTE/WORKING): assigned to a mechanic
+     * - COMPLETED: closed/completed
+     *
+     * Supabase mode: reads from `requests` table (current portal source of truth).
+     * Mock mode: reads from localStorage.
+     */
+    ensureSeedData();
+    const supabase = getSupabase();
+
+    if (supabase) {
+      const { data, error } = await supabase.from("requests").select("*").order("created_at", { ascending: false });
+      if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load requests."));
+      return (data || []).map(normalizeRequestRow);
+    }
+
+    return getLocalRequests().map((r) => ({
+      ...r,
+      status: normalizeStatus(r.status),
+    }));
+  },
+
+  // PUBLIC_INTERFACE
   async listUnassignedRequests() {
     ensureSeedData();
     const supabase = getSupabase();
@@ -879,10 +914,12 @@ export const dataService = {
   // PUBLIC_INTERFACE
   subscribeToRequestsChanges(handler) {
     /**
-     * Subscribe to Supabase realtime changes on `public.breakdown_requests` (best-effort).
+     * Subscribe to Supabase realtime changes affecting request lists.
      *
-     * Per the work item: Dashboard (available) and My Assignments should refresh automatically
-     * when `breakdown_requests` changes (INSERT/UPDATE/DELETE), including changes made by other clients.
+     * IMPORTANT:
+     * This mechanic portal currently reads/writes requests from the `public.requests` table.
+     * Some older setups may use `public.breakdown_requests`. We subscribe to both, best-effort,
+     * so the dashboard stays in sync across environments.
      *
      * Returns an unsubscribe() function. In mock mode, this is a no-op.
      */
@@ -891,18 +928,21 @@ export const dataService = {
 
     try {
       const channel = supabase
-        .channel("rrqa:breakdown_requests")
-        .on(
-          "postgres_changes",
-          { event: "*", schema: "public", table: "breakdown_requests" },
-          (payload) => {
-            try {
-              handler?.(payload);
-            } catch {
-              // ignore handler errors
-            }
+        .channel("rrqa:requests_realtime")
+        .on("postgres_changes", { event: "*", schema: "public", table: "requests" }, (payload) => {
+          try {
+            handler?.(payload);
+          } catch {
+            // ignore handler errors
           }
-        )
+        })
+        .on("postgres_changes", { event: "*", schema: "public", table: "breakdown_requests" }, (payload) => {
+          try {
+            handler?.(payload);
+          } catch {
+            // ignore handler errors
+          }
+        })
         .subscribe();
 
       return () => {
