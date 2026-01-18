@@ -6,6 +6,9 @@ import { Button } from "../components/ui/Button";
 import { dataService } from "../services/dataService";
 import { statusBadgeClass, statusLabel } from "../services/statusUtils";
 
+// --- DEBUG-ONLY Supabase profile log ---
+// (moved inside DashboardPage component below to comply with react-hooks rules)
+
 function statusBadge(status) {
   return <span className={statusBadgeClass(status)}>{statusLabel(status)}</span>;
 }
@@ -23,6 +26,39 @@ export function DashboardPage({ user }) {
   const [rows, setRows] = useState([]);
   const [error, setError] = useState("");
   const [busyId, setBusyId] = useState("");
+
+  // --- DEBUG-ONLY Supabase profile log ---
+  // eslint-disable-next-line no-unused-vars
+  useEffect(() => {
+    // Only run this debug snippet in dev environments.
+    if (
+      typeof process !== "undefined" &&
+      process.env &&
+      process.env.NODE_ENV === "production"
+    ) {
+      return;
+    }
+
+    // Dynamically try to access Supabase if loaded globally
+    async function debugProfile() {
+      if (!window.supabase) return;
+      const { data: { user } } = await window.supabase.auth.getUser();
+      // eslint-disable-next-line no-console
+      console.log("auth uid:", user?.id);
+
+      const { data: profile, error } = await window.supabase
+        .from("profiles")
+        .select("id, role, mechanic_status")
+        .eq("id", user.id)
+        .single();
+
+      // eslint-disable-next-line no-console
+      console.log("profile:", profile);
+      // eslint-disable-next-line no-console
+      console.log("error:", error);
+    }
+    debugProfile();
+  }, []);
 
   const load = async () => {
     setError("");
