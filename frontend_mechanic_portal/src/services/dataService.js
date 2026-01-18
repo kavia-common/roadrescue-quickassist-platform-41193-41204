@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { normalizeStatus } from "./statusUtils";
+import { emitRequestsChanged } from "./requestEvents";
 
 const LS_KEYS = {
   session: "rrqa.session",
@@ -782,7 +783,10 @@ export const dataService = {
         // ignore (schema might not have assignments)
       }
 
-      return updatedRow ? normalizeRequestRow(updatedRow) : true;
+      const normalizedUpdated = updatedRow ? normalizeRequestRow(updatedRow) : null;
+      // Notify any mounted lists (Dashboard / Assignments) to refresh.
+      emitRequestsChanged({ type: "accepted", requestId, status: "ASSIGNED", assignedMechanicId: mechanicId });
+      return normalizedUpdated || true;
     }
 
     // Mock mode behavior intact (also standardize to canonical)
@@ -799,6 +803,7 @@ export const dataService = {
       notes: [...(r.notes || []), note],
     };
     setLocalRequests(all);
+    emitRequestsChanged({ type: "accepted", requestId, status: "ASSIGNED", assignedMechanicId: mechanic.id });
     return all[idx];
   },
 
@@ -818,6 +823,7 @@ export const dataService = {
       const existing = await this.getRequestById(requestId);
       const { error } = await supabase.from("requests").update({ status: canonical, notes: [...(existing?.notes || []), note] }).eq("id", requestId);
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not update status."));
+      emitRequestsChanged({ type: "status_updated", requestId, status: canonical });
       return true;
     }
 
@@ -826,6 +832,7 @@ export const dataService = {
     if (idx < 0) throw new Error("Request not found.");
     all[idx] = { ...all[idx], status: canonical, notes: [...(all[idx].notes || []), note] };
     setLocalRequests(all);
+    emitRequestsChanged({ type: "status_updated", requestId, status: canonical });
     return true;
   },
 
@@ -868,4 +875,46 @@ export const dataService = {
 
   // PUBLIC_INTERFACE
   isSupabaseConfigured,
+
+  // PUBLIC_INTERFACE
+  subscribeToRequestsChanges(handler) {
+    /**
+     * Subscribe to Supabase realtime changes on `public.requests` (best-effort).
+     *
+     * This helps keep Dashboard and My Assignments in sync when:
+     * - another mechanic accepts a request
+     * - status updates happen from Request Detail
+     *
+     * Returns an unsubscribe() function. In mock mode, this is a no-op.
+     */
+    const supabase = getSupabase();
+    if (!supabase) return () => {};
+
+    try {
+      const channel = supabase
+        .channel("rrqa:requests")
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "requests" },
+          (payload) => {
+            try {
+              handler?.(payload);
+            } catch {
+              // ignore handler errors
+            }
+          }
+        )
+        .subscribe();
+
+      return () => {
+        try {
+          supabase.removeChannel(channel);
+        } catch {
+          // ignore
+        }
+      };
+    } catch {
+      return () => {};
+    }
+  },
 };

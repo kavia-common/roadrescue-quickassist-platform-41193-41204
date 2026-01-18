@@ -4,6 +4,7 @@ import { Card } from "../components/ui/Card";
 import { Table } from "../components/ui/Table";
 import { dataService } from "../services/dataService";
 import { statusBadgeClass, statusLabel } from "../services/statusUtils";
+import { subscribeRequestsChanged } from "../services/requestEvents";
 
 function statusBadge(status) {
   return <span className={statusBadgeClass(status)}>{statusLabel(status)}</span>;
@@ -22,19 +23,41 @@ export function MyAssignmentsPage({ user }) {
   const [rows, setRows] = useState([]);
   const [error, setError] = useState("");
 
+  const load = async () => {
+    setError("");
+    const list = await dataService.listMyAssignments(user.id);
+    setRows(list);
+  };
+
   useEffect(() => {
     let mounted = true;
-    (async () => {
+
+    const safeLoad = async () => {
       try {
-        const list = await dataService.listMyAssignments(user.id);
-        if (mounted) setRows(list);
+        await load();
       } catch (e) {
         if (mounted) setError(e.message || "Could not load assignments.");
       }
-    })();
+    };
+
+    safeLoad();
+
+    // Cross-page propagation: refresh if any request changes (accept/status update).
+    const offLocal = subscribeRequestsChanged(() => {
+      safeLoad();
+    });
+
+    // Best-effort Supabase realtime subscription (no-op in mock mode).
+    const offRealtime = dataService.subscribeToRequestsChanges(() => {
+      safeLoad();
+    });
+
     return () => {
       mounted = false;
+      offLocal?.();
+      offRealtime?.();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user.id]);
 
   return (

@@ -5,6 +5,7 @@ import { Table } from "../components/ui/Table";
 import { Button } from "../components/ui/Button";
 import { dataService } from "../services/dataService";
 import { statusBadgeClass, statusLabel } from "../services/statusUtils";
+import { subscribeRequestsChanged } from "../services/requestEvents";
 
 function statusBadge(status) {
   return <span className={statusBadgeClass(status)}>{statusLabel(status)}</span>;
@@ -36,6 +37,22 @@ export function DashboardPage({ user }) {
 
   useEffect(() => {
     load();
+
+    // Cross-page propagation: refresh if any request changes (accept/status update).
+    const offLocal = subscribeRequestsChanged(() => {
+      load();
+    });
+
+    // Best-effort Supabase realtime subscription (no-op in mock mode).
+    const offRealtime = dataService.subscribeToRequestsChanges(() => {
+      load();
+    });
+
+    return () => {
+      offLocal?.();
+      offRealtime?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const accept = async (id) => {
