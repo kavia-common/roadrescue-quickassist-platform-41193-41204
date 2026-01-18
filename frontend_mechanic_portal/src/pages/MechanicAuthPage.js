@@ -63,15 +63,25 @@ export function MechanicAuthPage() {
     }
   }, [authLoading, user, mechanicStatus, navigate]);
 
+  const isValidEmail = (value) => {
+    // Conservative, practical email check (accepts modern TLDs and '+' tags).
+    const v = String(value || "").trim();
+    if (!v) return false;
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+  };
+
   const onLogin = async (e) => {
     e.preventDefault();
     setError("");
-    if (!loginEmail.trim()) return setError("Email is required.");
+
+    const email = loginEmail.trim();
+    if (!email) return setError("Email is required.");
+    if (!isValidEmail(email)) return setError("Please enter a valid email address (e.g., shanmuga@kavia.ai).");
     if (loginPassword.length < 6) return setError("Password must be at least 6 characters.");
 
     setBusy(true);
     try {
-      const { user: u, error: err } = await signIn(loginEmail.trim(), loginPassword);
+      const { user: u, error: err } = await signIn(email, loginPassword);
       if (err) throw err;
 
       // Redirect will happen via effect once mechanicStatus is loaded,
@@ -148,6 +158,17 @@ export function MechanicAuthPage() {
             : "Create your account and submit an application (status: pending) for admin approval."
         }
       >
+        {process.env.REACT_APP_SUPABASE_URL && process.env.REACT_APP_SUPABASE_KEY ? (
+          <div className="alert alert-info" style={{ marginBottom: 12 }}>
+            Auth mode: <strong>Supabase</strong>
+          </div>
+        ) : (
+          <div className="alert alert-info" style={{ marginBottom: 12 }}>
+            Auth mode: <strong>Mock</strong>. Real accounts (e.g. shanmuga@kavia.ai) will not work until{" "}
+            <code>REACT_APP_SUPABASE_URL</code> and <code>REACT_APP_SUPABASE_KEY</code> are configured.
+          </div>
+        )}
+
         {error ? <div className="alert alert-error">{error}</div> : null}
 
         {mode === "login" ? (

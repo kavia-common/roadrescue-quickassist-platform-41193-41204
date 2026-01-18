@@ -504,8 +504,12 @@ export const dataService = {
   async login(email, password) {
     ensureSeedData();
     const supabase = getSupabase();
+
+    // Normalize inputs to avoid false negatives (e.g., trailing spaces or case differences).
+    const normalizedEmail = String(email || "").trim().toLowerCase();
+
     if (supabase) {
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+      const { data, error } = await supabase.auth.signInWithPassword({ email: normalizedEmail, password });
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Login failed."));
       const user = data.user;
 
@@ -529,9 +533,16 @@ export const dataService = {
       };
     }
 
+    // Mock mode: only seeded/demo users exist. If a real mechanic tries to log in here, the UX should
+    // explain that Supabase env vars are likely missing.
     const users = getLocalUsers();
-    const match = users.find((u) => u.email.toLowerCase() === email.toLowerCase() && u.password === password);
-    if (!match) throw new Error("Invalid email or password.");
+    const match = users.find((u) => String(u.email || "").trim().toLowerCase() === normalizedEmail && u.password === password);
+
+    if (!match) {
+      throw new Error(
+        "Invalid email or password. If you are trying to sign in with a real mechanic account, Supabase is likely not configured for this portal (missing REACT_APP_SUPABASE_URL / REACT_APP_SUPABASE_KEY)."
+      );
+    }
     if (match.role !== "mechanic" && match.role !== "approved_mechanic") throw new Error("This portal is for mechanics only.");
     setLocalSession({ userId: match.id });
     return { id: match.id, email: match.email, role: match.role, approved: match.approved, profile: match.profile };
