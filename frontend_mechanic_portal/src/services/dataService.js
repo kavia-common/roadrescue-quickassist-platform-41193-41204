@@ -610,18 +610,44 @@ export const dataService = {
      * - ASSIGNED (+ in-flight statuses like EN_ROUTE/WORKING): assigned to a mechanic
      * - COMPLETED: closed/completed
      *
-     * Supabase mode: reads from `requests` table (current portal source of truth).
+     * Supabase mode: reads from BOTH `requests` and `breakdown_requests` tables, merging for full backward compatibility!
+     * This resolves issues where user website might write to one and mechanic to another.
+     * If only one table exists in the schema, gracefully degrades.
      * Mock mode: reads from localStorage.
      */
     ensureSeedData();
     const supabase = getSupabase();
 
     if (supabase) {
-      const { data, error } = await supabase.from("requests").select("*").order("created_at", { ascending: false });
-      if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load requests."));
-      return (data || []).map(normalizeRequestRow);
+      // We'll attempt to pull from both tables (unioned client-side).
+      // If a table does not exist, Supabase returns an error (code: '42P01'), which we catch.
+      let requests = [];
+      let breakdownRequests = [];
+
+      // Try "requests" table first
+      try {
+        const { data, error } = await supabase.from("requests").select("*").order("created_at", { ascending: false });
+        if (!error && Array.isArray(data)) requests = data;
+      } catch {}
+
+      // Now try "breakdown_requests" as a fallback (for legacy/user portal flows)
+      try {
+        const { data, error } = await supabase.from("breakdown_requests").select("*").order("created_at", { ascending: false });
+        // Deduplicate by id in case of overlap, but prefer "requests" entries
+        if (!error && Array.isArray(data)) breakdownRequests = data;
+      } catch {}
+
+      // Merge all available, avoiding duplicate IDs (favor "requests" version if present)
+      const allRows = [
+        ...requests,
+        ...breakdownRequests.filter(breq =>
+          !requests.some(rreq => String(rreq.id) === String(breq.id))
+        ),
+      ];
+      return allRows.map(normalizeRequestRow);
     }
 
+    // In mock mode, normal behavior
     return getLocalRequests().map((r) => ({
       ...r,
       status: normalizeStatus(r.status),
