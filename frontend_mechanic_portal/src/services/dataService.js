@@ -33,8 +33,6 @@ function ensureSeedData() {
 
   const users = [
     { id: uid("u"), email: "user@example.com", password: "password123", role: "user", approved: true },
-    // Demo mechanic should be able to exercise the primary flow (accepting requests)
-    // in mock mode without needing an admin approval step.
     { id: uid("m"), email: "mech@example.com", password: "password123", role: "mechanic", approved: true, profile: { name: "Alex Mechanic", serviceArea: "Downtown" } },
     { id: uid("a"), email: "admin@example.com", password: "password123", role: "admin", approved: true },
   ];
@@ -49,7 +47,6 @@ function ensureSeedData() {
       vehicle: { make: "Toyota", model: "Corolla", year: "2016", plate: "ABC-123" },
       issueDescription: "Car won't start, clicking noise.",
       contact: { name: "Sam Driver", phone: "555-0101" },
-      // DB-aligned canonical token
       status: "open",
       assignedMechanicId: null,
       assignedMechanicEmail: null,
@@ -79,7 +76,6 @@ function isSupabaseConfigured() {
 function getSupabase() {
   const { url, key } = getSupabaseEnv();
   if (!url || !key) return null;
-
   try {
     return createClient(url, key);
   } catch {
@@ -108,39 +104,21 @@ function getLocalRequests() {
 function setLocalRequests(reqs) {
   writeJson(LS_KEYS.requests, reqs);
 }
+function getAssignments() {
+  return readJson("rrqa.assignments", []);
+}
+function setAssignments(list) {
+  writeJson("rrqa.assignments", list);
+}
 
-/**
- * Extracts {make, model, year, plate} from various possible DB shapes.
- * Supports:
- * - JSONB `vehicle` object
- * - flat columns like vehicle_make/vehicle_model
- * - alternate column names like make/model/year/plate
- */
 function normalizeVehicle(raw) {
-  /**
-   * Canonicalize vehicle fields into:
-   *   { make, model, year, plate }
-   *
-   * Supabase deployments differ; request rows might store vehicle as:
-   *  - requests.vehicle (JSONB)
-   *  - flat columns: vehicle_make / vehicle_model / vehicle_year / vehicle_plate
-   *  - flat columns: make / model / year / plate
-   *  - nested JSON objects: vehicle_info, vehicleDetails, etc.
-   *  - joined shapes: { request: { ... } } or { requests: { ... } }
-   *
-   * This function is intentionally defensive: it attempts multiple known shapes
-   * without assuming any one schema exists.
-   */
   const safeObj = (x) => (x && typeof x === "object" ? x : null);
-
-  // If we accidentally receive a wrapper (e.g. assignments join), unwrap it.
   const base =
     safeObj(raw?.request) ||
     safeObj(raw?.requests) ||
     safeObj(raw) ||
     {};
 
-  // Candidate objects that may contain vehicle fields.
   const vehicleCandidates = [
     safeObj(base?.vehicle),
     safeObj(base?.vehicle_info),
@@ -152,7 +130,6 @@ function normalizeVehicle(raw) {
     safeObj(base?.carInfo),
   ].filter(Boolean);
 
-  // Also support a case where vehicle is stored under a generic JSON payload.
   const detailsCandidates = [
     safeObj(base?.details),
     safeObj(base?.meta),
@@ -167,10 +144,9 @@ function normalizeVehicle(raw) {
 
   const allCandidates = [...vehicleCandidates, ...nestedVehicleFromDetails];
 
-  // Helper: return the first non-empty (non-null/undefined/empty-string) value
   const first = (...vals) => {
     for (const v of vals) {
-      if (v === 0) return v; // allow numeric year 0 (unlikely, but safe)
+      if (v === 0) return v;
       if (v === false) return v;
       if (v === null || v === undefined) continue;
       if (typeof v === "string" && v.trim() === "") continue;
@@ -179,32 +155,26 @@ function normalizeVehicle(raw) {
     return "";
   };
 
-  // Pull from JSON candidates first, then fall back to flat columns.
   const make = first(
     ...allCandidates.map((c) => c.make || c.Make || c.brand || c.manufacturer),
     base?.vehicle_make,
     base?.make
   );
-
   const model = first(
     ...allCandidates.map((c) => c.model || c.Model),
     base?.vehicle_model,
     base?.model
   );
-
   const year = first(
     ...allCandidates.map((c) => c.year || c.Year),
     base?.vehicle_year,
     base?.year
   );
-
-  // Plates are very inconsistent; support a few common aliases.
   const plate = first(
     ...allCandidates.map((c) => c.plate || c.Plate || c.licensePlate || c.license_plate || c.registration || c.reg),
     base?.vehicle_plate,
     base?.plate
   );
-
   return {
     make: typeof make === "string" ? make.trim() : `${make}`,
     model: typeof model === "string" ? model.trim() : `${model}`,
@@ -213,12 +183,6 @@ function normalizeVehicle(raw) {
   };
 }
 
-/**
- * Extracts contact {name, phone, email} from various possible DB shapes.
- * Supports:
- * - JSONB `contact` object
- * - flat columns like contact_name/contact_phone/contact_email
- */
 function normalizeContact(raw) {
   const c = raw?.contact && typeof raw.contact === "object" ? raw.contact : {};
   const name = c.name ?? raw?.contact_name ?? "";
@@ -236,7 +200,6 @@ function normalizeRequestRow(r) {
     vehicle: normalizeVehicle(r),
     issueDescription: r.issue_description ?? r.issueDescription ?? "",
     contact: normalizeContact(r),
-    // IMPORTANT: keep status canonical across apps
     status: normalizeStatus(r.status ?? ""),
     assignedMechanicId: r.assigned_mechanic_id ?? r.assignedMechanicId ?? null,
     assignedMechanicEmail: r.assigned_mechanic_email ?? r.assignedMechanicEmail ?? null,
@@ -246,13 +209,9 @@ function normalizeRequestRow(r) {
 
 async function supaGetUserRole(supabase, userId, email) {
   try {
-    // NOTE: Mechanic approval is NOT the `approved` boolean (legacy); it is `mechanic_status`.
-    // Keep reading role/profile, but do not infer approval from here.
     const { data, error } = await supabase.from("profiles").select("role,profile").eq("id", userId).maybeSingle();
     if (error) return { role: "user", profile: null };
     if (!data) {
-      // Best-effort: many setups have a DB trigger that creates profiles row.
-      // If insert is blocked (RLS), we still proceed and let later calls fail with a friendly error.
       try {
         await supabase.from("profiles").insert({ id: userId, email, role: "user" });
       } catch {
@@ -267,10 +226,6 @@ async function supaGetUserRole(supabase, userId, email) {
 }
 
 async function supaGetMechanicStatus(supabase, userId) {
-  /**
-   * Mechanic approval state is stored in profiles.mechanic_status (per user_input_ref).
-   * Expected values: 'pending' | 'approved' | 'rejected' | 'suspended'
-   */
   try {
     const { data, error } = await supabase.from("profiles").select("mechanic_status").eq("id", userId).maybeSingle();
     if (error) return null;
@@ -288,11 +243,9 @@ async function requireSupabaseUser(supabase) {
   return user;
 }
 
-/** Extract a friendlier UI message from a supabase-js error (best-effort). */
 function friendlySupabaseErrorMessage(err, fallback) {
   const msg = err?.message || "";
   if (!msg) return fallback;
-  // Common RLS message in Supabase
   if (msg.toLowerCase().includes("row level security")) return "Permission denied. Please contact an admin.";
   return msg;
 }
@@ -311,8 +264,6 @@ export const dataService = {
     if (supabase) {
       return await supaGetMechanicStatus(supabase, userId);
     }
-
-    // Mock mode: treat approved flag as the status source of truth.
     const users = getLocalUsers();
     const u = users.find((x) => x.id === userId);
     if (!u) return null;
@@ -321,20 +272,6 @@ export const dataService = {
 
   // PUBLIC_INTERFACE
   async registerMechanic({ fullName, email, password, phone, serviceArea, specialization }) {
-    /**
-     * Registration flow per user_input_ref (mechanic portal):
-     * 1) Create Supabase auth user
-     * 2) Call Edge Function mechanic-signup-upsert (best-effort; warn-only if it fails)
-     * 3) Ensure/update profiles row to set:
-     *    - role='mechanic'
-     *    - mechanic_status='pending'
-     *    - phone/service_area/specialization
-     * 4) (Optional/best-effort) insert user_roles row with role='mechanic'
-     *
-     * IMPORTANT: Do not reference a `mechanics` table.
-     *
-     * Mock mode: creates a local user with approved=true (so demo flow still works).
-     */
     ensureSeedData();
     const supabase = getSupabase();
 
@@ -345,7 +282,6 @@ export const dataService = {
         email,
         password,
         options: {
-          // Best-effort redirect for email confirmations (if enabled on project).
           ...(siteUrl ? { emailRedirectTo: siteUrl } : {}),
           data: { full_name: fullName },
         },
@@ -353,22 +289,11 @@ export const dataService = {
 
       if (signUpError) throw new Error(friendlySupabaseErrorMessage(signUpError, "Registration failed."));
 
-      // In some Supabase configs, user may not be immediately available until email confirmation.
-      // We try both signUpData.user and an explicit getUser fetch.
       const createdUser = signUpData?.user || (await supabase.auth.getUser())?.data?.user;
       if (!createdUser?.id) {
         throw new Error("Account created, but no active session. Please check your email for confirmation, then login.");
       }
 
-      /**
-       * Best-effort: notify the mechanic-signup-upsert Edge Function.
-       *
-       * IMPORTANT:
-       * - Do NOT block account creation if this fails.
-       * - URL is literal per user instructions for this step.
-       * - We send form-derived values from this scope:
-       *   phone, serviceArea, specialization, fullName (as display_name).
-       */
       try {
         await fetch("https://smpmldmpizlfvfduoftj.supabase.co/functions/v1/mechanic-signup-upsert", {
           method: "POST",
@@ -389,15 +314,12 @@ export const dataService = {
         console.warn("mechanic-signup-upsert edge function failed (non-blocking):", edgeErr);
       }
 
-      // Ensure there's a profiles row; if your DB already has an auth trigger that creates it,
-      // this insert will likely conflict. We ignore that and proceed to update.
       try {
         await supabase.from("profiles").insert({ id: createdUser.id, email: createdUser.email, role: "user" });
       } catch {
         // ignore
       }
 
-      // Authoritative mechanic fields live on `profiles` (per assets/supabase_mechanic_schema_cli.md).
       const updatePayload = {
         role: "mechanic",
         mechanic_status: "pending",
@@ -409,7 +331,6 @@ export const dataService = {
       const { error: profileErr } = await supabase.from("profiles").update(updatePayload).eq("id", createdUser.id);
       if (profileErr) throw new Error(friendlySupabaseErrorMessage(profileErr, "Could not submit mechanic application."));
 
-      // Role row (best-effort; ignore duplicates if RLS allows/blocks)
       try {
         const { error: roleError } = await supabase.from("user_roles").insert({ user_id: createdUser.id, role: "mechanic" });
         if (roleError && !String(roleError.message || "").toLowerCase().includes("duplicate")) {
@@ -420,7 +341,6 @@ export const dataService = {
         // ignore
       }
 
-      // Ensure returned user is treated as a mechanic and is NOT approved until mechanic_status says approved.
       const roleInfo = await supaGetUserRole(supabase, createdUser.id, createdUser.email);
       const mechStatus = await supaGetMechanicStatus(supabase, createdUser.id);
 
@@ -433,7 +353,7 @@ export const dataService = {
       };
     }
 
-    // Mock mode: create a local mechanic who is auto-approved to keep demo usable.
+    // Mock mode: create local mechanic with demo approval
     const users = getLocalUsers();
     const exists = users.some((u) => u.email.toLowerCase() === email.toLowerCase());
     if (exists) throw new Error("An account with that email already exists.");
@@ -452,11 +372,6 @@ export const dataService = {
 
   // PUBLIC_INTERFACE
   async createRequest({ user, vehicle, issueDescription, contact }) {
-    /**
-     * Create a new request as a mechanic (if allowed).
-     * Always set status='open' per DB constraint; do not send custom 'id', and only provide null/valid UUID for optional fields.
-     * This method is included for completeness and cross-portal consistency; actual use depends on portal's allowed flows.
-     */
     ensureSeedData();
     const supabase = getSupabase();
     const nowIso = new Date().toISOString();
@@ -488,14 +403,11 @@ export const dataService = {
         notes: [],
       };
       const { data, error } = await supabase.from("requests").insert(insertPayload).select().maybeSingle();
-
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not create request."));
       if (!data) throw new Error("Failed to insert request.");
-
       return normalizeRequestRow(data);
     }
 
-    // In mock mode, assign a custom string ID.
     const all = getLocalRequests();
     setLocalRequests([request, ...all]);
     return request;
@@ -505,26 +417,15 @@ export const dataService = {
   async login(email, password) {
     ensureSeedData();
     const supabase = getSupabase();
-
-    // Normalize inputs to avoid false negatives (e.g., trailing spaces or case differences).
     const normalizedEmail = String(email || "").trim().toLowerCase();
-
     if (supabase) {
       const { data, error } = await supabase.auth.signInWithPassword({ email: normalizedEmail, password });
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Login failed."));
       const user = data.user;
-
-      // Mechanic approval is stored in profiles.mechanic_status.
       const roleInfo = await supaGetUserRole(supabase, user.id, user.email);
       const mechStatus = await supaGetMechanicStatus(supabase, user.id);
-
-      // Gate 1: this portal is mechanics-only.
       const looksLikeMechanic = roleInfo.role === "mechanic" || roleInfo.role === "approved_mechanic" || Boolean(mechStatus);
       if (!looksLikeMechanic) throw new Error("This portal is for mechanics only.");
-
-      // Gate 2 (per user request): mechanic can login but cannot access portal pages until admin approval.
-      // We still return the user object so UI can route to /pending and show status,
-      // but `RequireAuth` blocks dashboard access unless mechanicStatus === 'approved'.
       return {
         id: user.id,
         email: user.email,
@@ -533,12 +434,8 @@ export const dataService = {
         profile: roleInfo.profile,
       };
     }
-
-    // Mock mode: only seeded/demo users exist. If a real mechanic tries to log in here, the UX should
-    // explain that Supabase env vars are likely missing.
     const users = getLocalUsers();
     const match = users.find((u) => String(u.email || "").trim().toLowerCase() === normalizedEmail && u.password === password);
-
     if (!match) {
       throw new Error(
         "Invalid email or password. If you are trying to sign in with a real mechanic account, Supabase is likely not configured for this portal (missing REACT_APP_SUPABASE_URL / REACT_APP_SUPABASE_KEY)."
@@ -567,11 +464,8 @@ export const dataService = {
       const { data } = await supabase.auth.getUser();
       const user = data?.user;
       if (!user) return null;
-
       const roleInfo = await supaGetUserRole(supabase, user.id, user.email);
       const mechStatus = await supaGetMechanicStatus(supabase, user.id);
-
-      // Approval gating is ALWAYS based on mechanic_status (per schema doc / user_input_ref).
       return {
         id: user.id,
         email: user.email,
@@ -598,7 +492,6 @@ export const dataService = {
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load requests."));
       return (data || []).map(normalizeRequestRow);
     }
-
     const all = getLocalRequests();
     return all.filter((r) => !r.assignedMechanicId && normalizeStatus(r.status) === "open");
   },
@@ -608,55 +501,39 @@ export const dataService = {
     ensureSeedData();
     const supabase = getSupabase();
 
-    // Supabase mode: read from assignments and join back to request data.
+    // Supabase mode: fetch from assignments joined to requests
     if (supabase) {
       const authedUser = await requireSupabaseUser(supabase);
-
-      // Prefer the current session user id to avoid spoofing.
       const effectiveMechanicId = authedUser.id || mechanicId;
       if (!effectiveMechanicId) throw new Error("Missing mechanic id.");
-
-      /**
-       * We expect an `assignments` table with a FK to `requests`:
-       * - assignments: { id, mechanic_id, request_id, created_at? }
-       * - requests: existing requests row
-       *
-       * IMPORTANT: Some deployments do NOT have assignments.accepted_at. Avoid selecting/ordering by it.
-       *
-       * This query shape assumes a relationship exists in Supabase:
-       * assignments.request_id -> requests.id
-       *
-       * IMPORTANT (schema variance):
-       * Different deployments store vehicle data differently:
-       *  - requests.vehicle (JSONB)
-       *  - or flat columns (vehicle_make/vehicle_model/...)
-       *  - or make/model/year/plate columns
-       *
-       * Selecting columns that don't exist causes hard SQL errors like:
-       *   "column requests_1.vehicle_plate does not exist"
-       *
-       * Therefore, we only select the joined request row as `*` and normalize vehicle/contact
-       * in JS via normalizeRequestRow(). If `vehicle` exists as JSON, it'll be included; if not,
-       * normalizeVehicle() will gracefully fall back to whatever flat fields are present.
-       */
       const { data, error } = await supabase
         .from("assignments")
-        .select("id, mechanic_id, request_id, request:requests(*)")
+        .select("id, request_id, mechanic_id, created_at, request:requests(*)")
         .eq("mechanic_id", effectiveMechanicId)
-        // Prefer deterministic ordering without relying on optional columns.
-        .order("request_id", { ascending: false });
-
-      if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load assignments."));
-
+        .order("id", { ascending: false });
+      if (error) {
+        throw new Error(
+          friendlySupabaseErrorMessage(
+            error,
+            "Could not load assignments. If this is a permissions issue, confirm `public.assignments` SELECT policy allows mechanics to read their own rows."
+          )
+        );
+      }
       return (data || [])
         .map((a) => a?.request || a?.requests)
         .filter(Boolean)
         .map(normalizeRequestRow);
     }
 
-    // Mock mode: requests are the source of truth.
-    const all = getLocalRequests();
-    return all.filter((r) => r.assignedMechanicId === mechanicId);
+    // Mock mode: use assignments table, join to requests
+    const assignments = getAssignments().filter((a) => a.mechanic_id === mechanicId);
+    const requestsAll = getLocalRequests();
+    return assignments
+      .map((a) => {
+        const req = requestsAll.find((r) => r.id === a.request_id);
+        return req ? req : null;
+      })
+      .filter(Boolean);
   },
 
   // PUBLIC_INTERFACE
@@ -668,7 +545,6 @@ export const dataService = {
       if (!data) return null;
       return normalizeRequestRow(data);
     }
-
     const all = getLocalRequests();
     return all.find((r) => r.id === requestId) || null;
   },
@@ -681,96 +557,78 @@ export const dataService = {
     const supabase = getSupabase();
     if (supabase) {
       const authedUser = await requireSupabaseUser(supabase);
-
-      /**
-       * Accept flow (Supabase mode):
-       * - MUST assign the request to the currently authenticated mechanic (auth.uid()).
-       * - MUST be concurrency-safe: only claim if still unassigned OR already assigned to me.
-       *
-       * IMPORTANT RLS NOTE:
-       * Many Supabase setups allow UPDATE but restrict SELECT/RETURNING. In those cases,
-       * an UPDATE can succeed but `.select().maybeSingle()` returns `null` data.
-       * We must NOT interpret that as “assigned elsewhere” blindly.
-       */
       const mechanicId = authedUser.id;
       const mechanicEmail = authedUser.email || mechanic.email;
 
-      // Preload existing request for note append and fast conflict detection.
       const existing = await this.getRequestById(requestId);
       if (!existing) throw new Error("Request not found.");
 
-      // If already assigned to someone else, stop (unless it's already assigned to this same mechanic).
       if (existing.assignedMechanicId && existing.assignedMechanicId !== mechanicId) {
         throw new Error("This request was already assigned to another mechanic.");
       }
 
-      // 1) Authoritative conditional UPDATE. Do not depend on RETURNING; it may be blocked by RLS.
       const updateQuery = supabase
         .from("requests")
         .update({
           assigned_mechanic_id: mechanicId,
           assigned_mechanic_email: mechanicEmail,
-          // DB CHECK constraint allows ONLY lowercase tokens
           status: "assigned",
           notes: [...(existing?.notes || []), note],
         })
         .eq("id", requestId)
-        // Only allow assignment if unassigned OR already assigned to this mechanic
         .or(`assigned_mechanic_id.is.null,assigned_mechanic_id.eq.${mechanicId}`);
 
-      // We still attempt to select for fast UI, but will fall back if it returns null due to RLS.
       const { data: updated, error: reqErr } = await updateQuery.select("*").maybeSingle();
 
       if (reqErr) {
         throw new Error(
           friendlySupabaseErrorMessage(
             reqErr,
-            "Could not accept this request. If this is a permissions issue, ensure Supabase RLS policies allow mechanics to assign requests."
+            "Could not accept this request. If this is a permissions issue, ensure Supabase RLS policies allow mechanics to UPDATE requests where assigned_mechanic_id IS NULL."
           )
         );
       }
 
-      // If RETURNING is blocked (or 0 rows updated), resolve ambiguity with a follow-up SELECT.
       const resolved = updated || (await this.getRequestById(requestId));
       if (!resolved) throw new Error("Could not accept request (request not found after update).");
 
-      // If the request is now assigned to me, accept succeeded (even if UPDATE didn't return a row).
+      let assignmentInsert = { success: false, error: null };
       if (resolved.assignedMechanicId === mechanicId) {
-        // 2) Best-effort: ensure an assignments row exists (non-blocking if table missing or RLS blocks it)
         try {
-          const { data: existingAssignment } = await supabase
-            .from("assignments")
-            .select("id")
-            .eq("request_id", requestId)
-            .eq("mechanic_id", mechanicId)
-            .maybeSingle();
-
-          if (!existingAssignment?.id) {
-            await supabase.from("assignments").insert({
-              mechanic_id: mechanicId,
-              request_id: requestId,
-            });
+          const { error: insErr } = await supabase.from("assignments").insert({
+            mechanic_id: mechanicId,
+            request_id: requestId,
+          });
+          if (insErr) {
+            assignmentInsert.success = false;
+            assignmentInsert.error = friendlySupabaseErrorMessage(insErr, "Assignments insert failed.");
+            // eslint-disable-next-line no-console
+            console.warn("Accept succeeded, but could not insert into assignments (non-blocking).", insErr);
+          } else {
+            assignmentInsert.success = true;
+            assignmentInsert.error = null;
           }
-        } catch {
-          // Non-blocking: deployments may not have assignments or may restrict inserts via RLS.
+        } catch (insCatchErr) {
+          assignmentInsert.success = false;
+          assignmentInsert.error = (insCatchErr && insCatchErr.message) || String(insCatchErr) || "Unknown assignments insert error.";
+          // eslint-disable-next-line no-console
+          console.warn("Accept succeeded, but assignments INSERT threw (non-blocking).", insCatchErr);
         }
-
-        return normalizeRequestRow(resolved);
+        return {
+          request: normalizeRequestRow(resolved),
+          acceptSuccess: true,
+          assignmentInsert,
+        };
       }
-
-      // If it became assigned to someone else, that's a genuine race.
       if (resolved.assignedMechanicId && resolved.assignedMechanicId !== mechanicId) {
         throw new Error("Could not accept this request. It was assigned to another mechanic.");
       }
-
-      // Still unassigned: the conditional UPDATE matched zero rows (or RLS blocked update),
-      // but no other mechanic claimed it. This is most likely an RLS UPDATE policy issue.
       throw new Error(
         "Could not accept this request due to permissions or policy. If you are approved, ensure Supabase RLS allows mechanics to UPDATE requests where assigned_mechanic_id IS NULL."
       );
     }
 
-    // Mock mode behavior intact (also standardize to canonical)
+    // ---- Mock mode parity: insert row into rrqa.assignments ----
     const all = getLocalRequests();
     const idx = all.findIndex((r) => r.id === requestId);
     if (idx < 0) throw new Error("Request not found.");
@@ -784,7 +642,32 @@ export const dataService = {
       notes: [...(r.notes || []), note],
     };
     setLocalRequests(all);
-    return all[idx];
+
+    let assignmentInsert = { success: false, error: null };
+    try {
+      const assignments = getAssignments();
+      const exists = assignments.some((a) => a.request_id === requestId && a.mechanic_id === mechanic.id);
+      if (exists) {
+        assignmentInsert = { success: false, error: "Assignment record already exists (mock mode)." };
+      } else {
+        const entry = {
+          id: uid("as"),
+          request_id: requestId,
+          mechanic_id: mechanic.id,
+          created_at: new Date().toISOString(),
+        };
+        setAssignments([entry, ...assignments]);
+        assignmentInsert = { success: true, error: null };
+      }
+    } catch (mockErr) {
+      assignmentInsert = { success: false, error: String(mockErr && mockErr.message ? mockErr.message : mockErr) || "Mock assignments error." };
+    }
+
+    return {
+      request: all[idx],
+      acceptSuccess: true,
+      assignmentInsert,
+    };
   },
 
   // PUBLIC_INTERFACE

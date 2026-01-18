@@ -38,17 +38,36 @@ export function DashboardPage({ user }) {
     load();
   }, []);
 
+  const [toast, setToast] = useState(null); // { type, message }
+  const toastDuration = 6000; // ms
+
   const accept = async (id) => {
     setBusyId(id);
+    setToast(null);
     try {
-      // acceptRequest returns updated request (Supabase + mock) for instant UI feedback
-      await dataService.acceptRequest({ requestId: id, mechanic: user });
+      // Updated: expect structured result
+      const result = await dataService.acceptRequest({ requestId: id, mechanic: user });
 
       // Optimistic local refresh: remove from "Available" list immediately.
       setRows((prev) => prev.filter((r) => r.id !== id));
 
       // Then reload for canonical truth (handles race/other accepts).
       await load();
+
+      // UX: Show toast per assignmentInsert outcome
+      if (result && typeof result === "object" && "assignmentInsert" in result) {
+        if (result.assignmentInsert.success) {
+          setToast({ type: "success", message: "Request accepted and added to My Assignments." });
+        } else {
+          setToast({
+            type: "warning",
+            message:
+              "Assigned, but could not create assignment record. The request may still appear in Available or not show in My Assignments. Please refresh or contact admin." +
+              (result.assignmentInsert.error ? "\n" + result.assignmentInsert.error : ""),
+          });
+        }
+        setTimeout(() => setToast(null), toastDuration);
+      }
     } catch (e) {
       setError(e.message || "Could not accept request.");
     } finally {
@@ -62,6 +81,21 @@ export function DashboardPage({ user }) {
         <h1 className="h1">Dashboard</h1>
         <p className="lead">Available requests awaiting a mechanic.</p>
       </div>
+
+      {toast && (
+        <div
+          className={
+            toast.type === "success"
+              ? "alert"
+              : toast.type === "warning"
+              ? "alert alert-error"
+              : "alert alert-info"
+          }
+          style={{ marginBottom: 12, whiteSpace: "pre-line" }}
+        >
+          {toast.message}
+        </div>
+      )}
 
       {!user.approved ? (
         <div className="alert alert-info">
