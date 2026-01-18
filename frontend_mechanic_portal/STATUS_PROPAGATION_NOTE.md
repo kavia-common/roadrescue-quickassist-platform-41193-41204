@@ -13,7 +13,7 @@ This change ensures that request status transitions (OPEN → ASSIGNED → COMPL
    - Both **DashboardPage** and **MyAssignmentsPage** subscribe and auto-refresh
 
 2. **Supabase realtime propagation (best-effort)**
-   - `dataService.subscribeToRequestsChanges()` subscribes to `public.requests` via `supabase.channel(...).on('postgres_changes', ...)`
+   - `dataService.subscribeToRequestsChanges()` subscribes to `public.breakdown_requests` via `supabase.channel(...).on('postgres_changes', ...)`
    - Pages also subscribe to this (no-op in mock mode)
 
 This combination covers:

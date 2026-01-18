@@ -879,11 +879,10 @@ export const dataService = {
   // PUBLIC_INTERFACE
   subscribeToRequestsChanges(handler) {
     /**
-     * Subscribe to Supabase realtime changes on `public.requests` (best-effort).
+     * Subscribe to Supabase realtime changes on `public.breakdown_requests` (best-effort).
      *
-     * This helps keep Dashboard and My Assignments in sync when:
-     * - another mechanic accepts a request
-     * - status updates happen from Request Detail
+     * Per the work item: Dashboard (available) and My Assignments should refresh automatically
+     * when `breakdown_requests` changes (INSERT/UPDATE/DELETE), including changes made by other clients.
      *
      * Returns an unsubscribe() function. In mock mode, this is a no-op.
      */
@@ -892,10 +891,10 @@ export const dataService = {
 
     try {
       const channel = supabase
-        .channel("rrqa:requests")
+        .channel("rrqa:breakdown_requests")
         .on(
           "postgres_changes",
-          { event: "*", schema: "public", table: "requests" },
+          { event: "*", schema: "public", table: "breakdown_requests" },
           (payload) => {
             try {
               handler?.(payload);
