@@ -16,6 +16,64 @@ const SPECIALIZATIONS = [
   "Towing",
 ];
 
+function EyeIcon({ open = false, size = 18 }) {
+  // Inline SVGs to avoid adding dependencies.
+  // "open" = password visible.
+  if (open) {
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+        <path
+          d="M1.5 12s3.75-7.5 10.5-7.5S22.5 12 22.5 12 18.75 19.5 12 19.5 1.5 12 1.5 12Z"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinejoin="round"
+        />
+        <path
+          d="M12 15.75A3.75 3.75 0 1 0 12 8.25a3.75 3.75 0 0 0 0 7.5Z"
+          stroke="currentColor"
+          strokeWidth="2"
+        />
+      </svg>
+    );
+  }
+
+  // Eye with slash (hidden)
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+      <path
+        d="M3 3l18 18"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+      <path
+        d="M10.6 10.6A2.5 2.5 0 0 0 13.4 13.4"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+      <path
+        d="M9.2 5.4A10.7 10.7 0 0 1 12 4.5c6.75 0 10.5 7.5 10.5 7.5a18.7 18.7 0 0 1-3.3 4.6"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M6.1 6.1C3.2 8.4 1.5 12 1.5 12s3.75 7.5 10.5 7.5c1.2 0 2.3-.2 3.3-.6"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M12 8.25c2.07 0 3.75 1.68 3.75 3.75"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 // PUBLIC_INTERFACE
 export function MechanicAuthPage() {
   /** Mechanic auth page: Login + Registration that creates a pending mechanic application (Supabase mode). */
@@ -25,6 +83,10 @@ export function MechanicAuthPage() {
 
   const { user, mechanicStatus, loading: authLoading, signIn, signUp } = useAuth();
   const navigate = useNavigate();
+
+  // Local state for show/hide password (login + register kept separate to avoid surprises)
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
+  const [showRegPassword, setShowRegPassword] = useState(false);
 
   // Login form
   const [loginEmail, setLoginEmail] = useState("mech@example.com");
@@ -132,6 +194,29 @@ export function MechanicAuthPage() {
     });
   };
 
+  const passwordToggleBaseStyle = {
+    position: "absolute",
+    right: 8,
+    top: "50%",
+    transform: "translateY(-50%)",
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    display: "grid",
+    placeItems: "center",
+    color: "var(--muted)",
+    background: "transparent",
+    border: "1px solid transparent",
+    cursor: "pointer",
+    // No layout shift: button is absolutely positioned within a fixed-height input wrapper.
+  };
+
+  const passwordToggleFocusStyle = {
+    borderColor: "rgba(37,99,235,0.45)",
+    boxShadow: "0 0 0 4px rgba(37,99,235,0.12)",
+    color: "var(--text)",
+  };
+
   return (
     <div className="container">
       <div className="hero">
@@ -174,14 +259,49 @@ export function MechanicAuthPage() {
         {mode === "login" ? (
           <form className="form" onSubmit={onLogin}>
             <Input label="Email" name="loginEmail" value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} required />
-            <Input
-              label="Password"
-              name="loginPassword"
-              type="password"
-              value={loginPassword}
-              onChange={(e) => setLoginPassword(e.target.value)}
-              required
-            />
+
+            <div className="field">
+              <label className="label" htmlFor="loginPassword">
+                Password <span className="req">*</span>
+              </label>
+
+              <div style={{ position: "relative" }}>
+                <input
+                  id="loginPassword"
+                  name="loginPassword"
+                  className="input"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  type={showLoginPassword ? "text" : "password"}
+                  // keep same feel as Input; pad right so icon doesn't overlap text
+                  style={{ paddingRight: 46 }}
+                  required
+                />
+
+                <button
+                  type="button"
+                  role="button"
+                  aria-label={showLoginPassword ? "Hide password" : "Show password"}
+                  onClick={() => setShowLoginPassword((v) => !v)}
+                  onKeyDown={(e) => {
+                    // Keyboard operability: Enter/Space toggles
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setShowLoginPassword((v) => !v);
+                    }
+                  }}
+                  style={passwordToggleBaseStyle}
+                  onFocus={(e) => {
+                    Object.assign(e.currentTarget.style, passwordToggleFocusStyle);
+                  }}
+                  onBlur={(e) => {
+                    Object.assign(e.currentTarget.style, passwordToggleBaseStyle);
+                  }}
+                >
+                  <EyeIcon open={showLoginPassword} />
+                </button>
+              </div>
+            </div>
 
             <div className="row">
               <Button type="submit" disabled={busy}>
@@ -197,15 +317,50 @@ export function MechanicAuthPage() {
             <Input label="Full name" name="fullName" value={fullName} onChange={(e) => setFullName(e.target.value)} required />
             <Input label="Email" name="regEmail" value={regEmail} onChange={(e) => setRegEmail(e.target.value)} required />
             <Input label="Phone" name="phone" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Optional" />
-            <Input
-              label="Password"
-              name="regPassword"
-              type="password"
-              value={regPassword}
-              onChange={(e) => setRegPassword(e.target.value)}
-              required
-              hint="Minimum 6 characters"
-            />
+
+            <div className="field">
+              <label className="label" htmlFor="regPassword">
+                Password <span className="req">*</span>
+              </label>
+
+              <div style={{ position: "relative" }}>
+                <input
+                  id="regPassword"
+                  name="regPassword"
+                  className="input"
+                  value={regPassword}
+                  onChange={(e) => setRegPassword(e.target.value)}
+                  type={showRegPassword ? "text" : "password"}
+                  style={{ paddingRight: 46 }}
+                  required
+                />
+
+                <button
+                  type="button"
+                  role="button"
+                  aria-label={showRegPassword ? "Hide password" : "Show password"}
+                  onClick={() => setShowRegPassword((v) => !v)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setShowRegPassword((v) => !v);
+                    }
+                  }}
+                  style={passwordToggleBaseStyle}
+                  onFocus={(e) => {
+                    Object.assign(e.currentTarget.style, passwordToggleFocusStyle);
+                  }}
+                  onBlur={(e) => {
+                    Object.assign(e.currentTarget.style, passwordToggleBaseStyle);
+                  }}
+                >
+                  <EyeIcon open={showRegPassword} />
+                </button>
+              </div>
+
+              <div className="hint">Minimum 6 characters</div>
+            </div>
+
             <Input label="Service area" name="serviceArea" value={serviceArea} onChange={(e) => setServiceArea(e.target.value)} placeholder="Optional" />
 
             <div className="field">
