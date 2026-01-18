@@ -323,11 +323,12 @@ export const dataService = {
     /**
      * Registration flow per user_input_ref (mechanic portal):
      * 1) Create Supabase auth user
-     * 2) Ensure/update profiles row to set:
+     * 2) Call Edge Function mechanic-signup-upsert (best-effort; warn-only if it fails)
+     * 3) Ensure/update profiles row to set:
      *    - role='mechanic'
      *    - mechanic_status='pending'
      *    - phone/service_area/specialization
-     * 3) (Optional/best-effort) insert user_roles row with role='mechanic'
+     * 4) (Optional/best-effort) insert user_roles row with role='mechanic'
      *
      * IMPORTANT: Do not reference a `mechanics` table.
      *
@@ -356,6 +357,35 @@ export const dataService = {
       const createdUser = signUpData?.user || (await supabase.auth.getUser())?.data?.user;
       if (!createdUser?.id) {
         throw new Error("Account created, but no active session. Please check your email for confirmation, then login.");
+      }
+
+      /**
+       * Best-effort: notify the mechanic-signup-upsert Edge Function.
+       *
+       * IMPORTANT:
+       * - Do NOT block account creation if this fails.
+       * - URL is literal per user instructions for this step.
+       * - We send form-derived values from this scope:
+       *   phone, serviceArea, specialization, fullName (as display_name).
+       */
+      try {
+        await fetch("https://smpmldmpizlfvfduoftj.supabase.co/functions/v1/mechanic-signup-upsert", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            user_id: createdUser.id,
+            email: createdUser.email,
+            phone: phone || "",
+            service_area: serviceArea || "",
+            specialization: Array.isArray(specialization) ? specialization : [],
+            display_name: fullName || "",
+          }),
+        });
+      } catch (edgeErr) {
+        // eslint-disable-next-line no-console
+        console.warn("mechanic-signup-upsert edge function failed (non-blocking):", edgeErr);
       }
 
       // Ensure there's a profiles row; if your DB already has an auth trigger that creates it,
