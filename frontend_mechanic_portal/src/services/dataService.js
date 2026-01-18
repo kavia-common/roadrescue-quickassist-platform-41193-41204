@@ -709,7 +709,7 @@ export const dataService = {
         .update({
           assigned_mechanic_id: mechanicId,
           assigned_mechanic_email: mechanicEmail,
-          status: "ASSIGNED",
+          status: "Assigned",
           notes: [...(existing?.notes || []), note],
         })
         .eq("id", requestId)
@@ -778,7 +778,7 @@ export const dataService = {
       ...r,
       assignedMechanicId: mechanic.id,
       assignedMechanicEmail: mechanic.email,
-      status: "ASSIGNED",
+      status: "Assigned",
       notes: [...(r.notes || []), note],
     };
     setLocalRequests(all);

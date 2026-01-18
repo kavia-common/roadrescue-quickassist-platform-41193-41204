@@ -1,20 +1,25 @@
 /**
  * Shared request status utilities (Mechanic Portal).
  *
- * We store canonical statuses in Supabase (source of truth) as UPPERCASE tokens
- * to be schema-agnostic and consistent across apps.
+ * IMPORTANT:
+ * The Supabase DB for `requests.status` is guarded by a CHECK constraint that expects
+ * exact allowed string values. For "accepted" requests, the allowed value is:
+ *   - "Assigned" (capital A, rest lowercase)
  *
- * UI can display friendly labels derived from these canonical values.
+ * Therefore, this portal:
+ * - Writes "Assigned" when accepting a request
+ * - Treats variants like "ASSIGNED" / "accepted" as equivalent when *reading*
+ * - Uses friendly labels/badges derived from normalized values
  */
 
 /**
  * PUBLIC_INTERFACE
  */
 export function normalizeStatus(rawStatus) {
-  /** Normalize any incoming status (db/UI/legacy) into a canonical uppercase token. */
-  if (!rawStatus) return "OPEN";
+  /** Normalize any incoming status (db/UI/legacy) into a canonical token used by this app. */
+  if (!rawStatus) return "Open";
   const s = String(rawStatus).trim();
-  if (!s) return "OPEN";
+  if (!s) return "Open";
 
   // Normalize common legacy/UI variants
   const upper = s.toUpperCase();
@@ -23,29 +28,26 @@ export function normalizeStatus(rawStatus) {
   const compact = upper.replace(/\s+/g, "_");
 
   const map = {
-    // Legacy "open" variants
-    OPEN: "OPEN",
-    SUBMITTED: "OPEN",
-    IN_REVIEW: "OPEN",
-    "IN REVIEW": "OPEN",
+    // Open variants
+    OPEN: "Open",
+    SUBMITTED: "Open",
+    IN_REVIEW: "Open",
 
-    // Accepted/assigned variants
-    ASSIGNED: "ASSIGNED",
-    ACCEPTED: "ASSIGNED",
+    // Assigned/accepted variants (DB allowed value is Title Case "Assigned")
+    ASSIGNED: "Assigned",
+    ACCEPTED: "Assigned",
 
     // In-flight work
     EN_ROUTE: "EN_ROUTE",
-    "EN ROUTE": "EN_ROUTE",
     WORKING: "WORKING",
     IN_PROGRESS: "WORKING",
-    "IN PROGRESS": "WORKING",
 
     // Completion
     COMPLETED: "COMPLETED",
     CLOSED: "COMPLETED",
   };
 
-  return map[compact] || map[upper] || compact;
+  return map[compact] || map[upper] || s;
 }
 
 /**
@@ -54,14 +56,16 @@ export function normalizeStatus(rawStatus) {
 export function statusLabel(rawStatus) {
   /** Convert raw/canonical status into a professional UI label. */
   const canonical = normalizeStatus(rawStatus);
+
   const labels = {
-    OPEN: "Open",
-    ASSIGNED: "Assigned",
+    Open: "Open",
+    Assigned: "Assigned",
     EN_ROUTE: "En Route",
     WORKING: "Working",
     COMPLETED: "Completed",
   };
-  return labels[canonical] || canonical.replace(/_/g, " ");
+
+  return labels[canonical] || String(canonical).replace(/_/g, " ");
 }
 
 /**
@@ -70,12 +74,14 @@ export function statusLabel(rawStatus) {
 export function statusBadgeClass(rawStatus) {
   /** Return a badge CSS class for the given status (expects global badge styles). */
   const canonical = normalizeStatus(rawStatus);
+
   const map = {
-    OPEN: "badge badge-blue",
-    ASSIGNED: "badge badge-blue",
+    Open: "badge badge-blue",
+    Assigned: "badge badge-blue",
     EN_ROUTE: "badge badge-amber",
     WORKING: "badge badge-amber",
     COMPLETED: "badge badge-green",
   };
+
   return map[canonical] || "badge";
 }
