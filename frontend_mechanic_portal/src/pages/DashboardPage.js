@@ -41,6 +41,10 @@ export function DashboardPage({ user }) {
   const accept = async (id) => {
     setBusyId(id);
     try {
+      if (!user?.approved) {
+        throw new Error("Your mechanic account is pending approval. You cannot accept requests yet.");
+      }
+
       // acceptRequest returns updated request (Supabase + mock) for instant UI feedback
       await dataService.acceptRequest({ requestId: id, mechanic: user });
 
@@ -65,7 +69,7 @@ export function DashboardPage({ user }) {
 
       {!user.approved ? (
         <div className="alert alert-info">
-          Your account is <strong>pending admin approval</strong>. You can browse, but accepting requests may be restricted by policy.
+          Your account is <strong>pending admin approval</strong>. You can browse available requests, but you cannot accept assignments until you are approved.
         </div>
       ) : null}
 

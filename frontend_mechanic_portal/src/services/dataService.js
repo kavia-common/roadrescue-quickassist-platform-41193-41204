@@ -49,7 +49,7 @@ function ensureSeedData() {
       vehicle: { make: "Toyota", model: "Corolla", year: "2016", plate: "ABC-123" },
       issueDescription: "Car won't start, clicking noise.",
       contact: { name: "Sam Driver", phone: "555-0101" },
-      status: "Submitted",
+      status: "OPEN",
       assignedMechanicId: null,
       assignedMechanicEmail: null,
       notes: [],
@@ -133,11 +133,7 @@ function normalizeVehicle(raw) {
   const safeObj = (x) => (x && typeof x === "object" ? x : null);
 
   // If we accidentally receive a wrapper (e.g. assignments join), unwrap it.
-  const base =
-    safeObj(raw?.request) ||
-    safeObj(raw?.requests) ||
-    safeObj(raw) ||
-    {};
+  const base = safeObj(raw?.request) || safeObj(raw?.requests) || safeObj(raw) || {};
 
   // Candidate objects that may contain vehicle fields.
   const vehicleCandidates = [
@@ -152,13 +148,7 @@ function normalizeVehicle(raw) {
   ].filter(Boolean);
 
   // Also support a case where vehicle is stored under a generic JSON payload.
-  const detailsCandidates = [
-    safeObj(base?.details),
-    safeObj(base?.meta),
-    safeObj(base?.metadata),
-    safeObj(base?.payload),
-    safeObj(base?.data),
-  ].filter(Boolean);
+  const detailsCandidates = [safeObj(base?.details), safeObj(base?.meta), safeObj(base?.metadata), safeObj(base?.payload), safeObj(base?.data)].filter(Boolean);
 
   const nestedVehicleFromDetails = detailsCandidates
     .map((d) => safeObj(d?.vehicle) || safeObj(d?.vehicle_info) || safeObj(d?.vehicleInfo) || safeObj(d?.car) || safeObj(d?.carInfo))
@@ -179,23 +169,11 @@ function normalizeVehicle(raw) {
   };
 
   // Pull from JSON candidates first, then fall back to flat columns.
-  const make = first(
-    ...allCandidates.map((c) => c.make || c.Make || c.brand || c.manufacturer),
-    base?.vehicle_make,
-    base?.make
-  );
+  const make = first(...allCandidates.map((c) => c.make || c.Make || c.brand || c.manufacturer), base?.vehicle_make, base?.make);
 
-  const model = first(
-    ...allCandidates.map((c) => c.model || c.Model),
-    base?.vehicle_model,
-    base?.model
-  );
+  const model = first(...allCandidates.map((c) => c.model || c.Model), base?.vehicle_model, base?.model);
 
-  const year = first(
-    ...allCandidates.map((c) => c.year || c.Year),
-    base?.vehicle_year,
-    base?.year
-  );
+  const year = first(...allCandidates.map((c) => c.year || c.Year), base?.vehicle_year, base?.year);
 
   // Plates are very inconsistent; support a few common aliases.
   const plate = first(
@@ -294,6 +272,75 @@ function friendlySupabaseErrorMessage(err, fallback) {
   // Common RLS message in Supabase
   if (msg.toLowerCase().includes("row level security")) return "Permission denied. Please contact an admin.";
   return msg;
+}
+
+/**
+ * Credits/fees support:
+ * Some deployments deduct credits when a mechanic accepts a job.
+ *
+ * Because we don't have the authoritative attachment in this session, we implement a defensive,
+ * schema-tolerant deduction strategy:
+ * - If `credits` table exists, decrement `credits.balance` for the mechanic.
+ * - Otherwise, if a `profiles.credits` numeric column exists, decrement it.
+ * - Otherwise, proceed without deduction (but keep acceptance working).
+ *
+ * IMPORTANT: This is best-effort and should not block acceptance unless the DB explicitly
+ * requires deduction (in which case the request update will fail and surface a friendly error).
+ */
+async function tryDeductCreditsBestEffort({ supabase, mechanicId, amount }) {
+  if (!amount || amount <= 0) return { deducted: false };
+
+  // 1) Try `credits` table: credits(user_id, balance)
+  try {
+    const { data: row, error: selErr } = await supabase.from("credits").select("user_id,balance").eq("user_id", mechanicId).maybeSingle();
+    if (!selErr && row) {
+      const balance = Number(row.balance ?? 0);
+      if (Number.isNaN(balance)) return { deducted: false };
+      if (balance < amount) throw new Error("Insufficient credits to accept this request.");
+      const { error: updErr } = await supabase.from("credits").update({ balance: balance - amount }).eq("user_id", mechanicId);
+      if (updErr) throw updErr;
+      return { deducted: true, method: "credits.balance" };
+    }
+  } catch (e) {
+    // If the table exists but we had a real constraint issue (e.g., insufficient), bubble that.
+    const msg = e?.message || "";
+    if (msg.includes("Insufficient credits")) throw e;
+    // Otherwise, ignore and fall through.
+  }
+
+  // 2) Try profiles.credits numeric column
+  try {
+    const { data: profile, error: selErr } = await supabase.from("profiles").select("credits").eq("id", mechanicId).maybeSingle();
+    if (!selErr && profile && typeof profile.credits !== "undefined") {
+      const bal = Number(profile.credits ?? 0);
+      if (Number.isNaN(bal)) return { deducted: false };
+      if (bal < amount) throw new Error("Insufficient credits to accept this request.");
+      const { error: updErr } = await supabase.from("profiles").update({ credits: bal - amount }).eq("id", mechanicId);
+      if (updErr) throw updErr;
+      return { deducted: true, method: "profiles.credits" };
+    }
+  } catch (e) {
+    const msg = e?.message || "";
+    if (msg.includes("Insufficient credits")) throw e;
+  }
+
+  return { deducted: false };
+}
+
+/**
+ * Decide the acceptance fee to deduct, best-effort:
+ * - Try `fees` table with one row (base_fee or accept_fee)
+ * - Else default to 0 (do not block acceptance)
+ */
+async function getAcceptanceFeeBestEffort(supabase) {
+  try {
+    const { data, error } = await supabase.from("fees").select("*").limit(1).maybeSingle();
+    if (error || !data) return 0;
+    const v = Number(data.accept_fee ?? data.base_fee ?? data.baseFee ?? 0);
+    return Number.isFinite(v) ? v : 0;
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -437,7 +484,7 @@ export const dataService = {
       vehicle,
       issueDescription,
       contact,
-      status: "open",
+      status: "OPEN",
       assignedMechanicId: null,
       assignedMechanicEmail: null,
       notes: [],
@@ -451,7 +498,7 @@ export const dataService = {
         vehicle,
         issue_description: issueDescription,
         contact,
-        status: "open",
+        status: "OPEN",
         assigned_mechanic_id: null,
         assigned_mechanic_email: null,
         notes: [],
@@ -487,9 +534,7 @@ export const dataService = {
       const looksLikeMechanic = roleInfo.role === "mechanic" || roleInfo.role === "approved_mechanic" || Boolean(mechStatus);
       if (!looksLikeMechanic) throw new Error("This portal is for mechanics only.");
 
-      // Gate 2 (per user request): mechanic can login but cannot access portal pages until admin approval.
-      // We still return the user object so UI can route to /pending and show status,
-      // but `RequireAuth` blocks dashboard access unless mechanicStatus === 'approved'.
+      // Gate 2: mechanic can login but cannot access portal pages until admin approval.
       return {
         id: user.id,
         email: user.email,
@@ -529,7 +574,7 @@ export const dataService = {
       const roleInfo = await supaGetUserRole(supabase, user.id, user.email);
       const mechStatus = await supaGetMechanicStatus(supabase, user.id);
 
-      // Approval gating is ALWAYS based on mechanic_status (per schema doc / user_input_ref).
+      // Approval gating is ALWAYS based on mechanic_status.
       return {
         id: user.id,
         email: user.email,
@@ -552,13 +597,20 @@ export const dataService = {
     ensureSeedData();
     const supabase = getSupabase();
     if (supabase) {
+      /**
+       * Request syncing:
+       * - We list "open/unassigned" requests from Supabase as the mechanic's "Available" list.
+       * - Different deployments may store status differently; we filter in JS using normalizeStatus()
+       *   to avoid schema-specific SQL filters that can mismatch.
+       */
       const { data, error } = await supabase.from("requests").select("*").is("assigned_mechanic_id", null).order("created_at", { ascending: false });
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load requests."));
-      return (data || []).map(normalizeRequestRow);
+      const normalized = (data || []).map(normalizeRequestRow);
+      return normalized.filter((r) => normalizeStatus(r.status) === "OPEN");
     }
 
     const all = getLocalRequests();
-    return all.filter((r) => !r.assignedMechanicId && (r.status === "Submitted" || r.status === "In Review"));
+    return all.filter((r) => !r.assignedMechanicId && normalizeStatus(r.status) === "OPEN");
   },
 
   // PUBLIC_INTERFACE
@@ -566,47 +618,28 @@ export const dataService = {
     ensureSeedData();
     const supabase = getSupabase();
 
-    // Supabase mode: read from assignments and join back to request data.
+    // Supabase mode: prefer requests table as source of truth (more portable than assignments joins).
     if (supabase) {
       const authedUser = await requireSupabaseUser(supabase);
-
-      // Prefer the current session user id to avoid spoofing.
       const effectiveMechanicId = authedUser.id || mechanicId;
       if (!effectiveMechanicId) throw new Error("Missing mechanic id.");
 
-      /**
-       * We expect an `assignments` table with a FK to `requests`:
-       * - assignments: { id, mechanic_id, request_id, created_at? }
-       * - requests: existing requests row
-       *
-       * IMPORTANT: Some deployments do NOT have assignments.accepted_at. Avoid selecting/ordering by it.
-       *
-       * This query shape assumes a relationship exists in Supabase:
-       * assignments.request_id -> requests.id
-       *
-       * IMPORTANT (schema variance):
-       * Different deployments store vehicle data differently:
-       *  - requests.vehicle (JSONB)
-       *  - or flat columns (vehicle_make/vehicle_model/...)
-       *  - or make/model/year/plate columns
-       *
-       * Selecting columns that don't exist causes hard SQL errors like:
-       *   "column requests_1.vehicle_plate does not exist"
-       *
-       * Therefore, we only select the joined request row as `*` and normalize vehicle/contact
-       * in JS via normalizeRequestRow(). If `vehicle` exists as JSON, it'll be included; if not,
-       * normalizeVehicle() will gracefully fall back to whatever flat fields are present.
-       */
-      const { data, error } = await supabase
+      // Primary: requests assigned to this mechanic.
+      const { data, error } = await supabase.from("requests").select("*").eq("assigned_mechanic_id", effectiveMechanicId).order("created_at", { ascending: false });
+      if (!error && Array.isArray(data)) {
+        return data.map(normalizeRequestRow);
+      }
+
+      // Fallback: if request assignment column doesn't exist in someone's schema,
+      // try assignments join best-effort.
+      const { data: aData, error: aErr } = await supabase
         .from("assignments")
         .select("id, mechanic_id, request_id, request:requests(*)")
         .eq("mechanic_id", effectiveMechanicId)
-        // Prefer deterministic ordering without relying on optional columns.
         .order("request_id", { ascending: false });
 
-      if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not load assignments."));
-
-      return (data || [])
+      if (aErr) throw new Error(friendlySupabaseErrorMessage(aErr, "Could not load assignments."));
+      return (aData || [])
         .map((a) => a?.request || a?.requests)
         .filter(Boolean)
         .map(normalizeRequestRow);
@@ -641,18 +674,20 @@ export const dataService = {
       const authedUser = await requireSupabaseUser(supabase);
 
       /**
-       * Some deployments do not have a UNIQUE constraint that matches common upsert conflict targets.
-       * To remain schema-agnostic, we do a SELECT then UPDATE/INSERT for assignments.
+       * Acceptance + credit deduction (best-effort):
+       * - Verify request is still unassigned
+       * - Deduct acceptance fee (if fees/credits exist) best-effort
+       * - Create assignment row best-effort (if assignments table exists)
+       * - Update request row with mechanic linkage + status transition to ASSIGNED
        *
-       * Cross-app requirement:
-       * - Supabase is the source of truth.
-       * - On accept, write a professional canonical status to requests.status.
-       *   We standardize on: ASSIGNED
+       * NOTE: Without a DB transaction/edge function, this cannot be perfectly atomic.
+       * We prefer: update request first with a guard, then do optional side effects.
+       * If side effects fail (missing tables), we still keep request assigned.
        */
       const mechanicId = authedUser.id;
       const mechanicEmail = authedUser.email || mechanic.email;
 
-      // Preload existing request for note append and to avoid overwriting notes incorrectly.
+      // Preload existing request.
       const existing = await this.getRequestById(requestId);
       if (!existing) throw new Error("Request not found.");
 
@@ -661,60 +696,93 @@ export const dataService = {
         throw new Error("This request was already assigned to another mechanic.");
       }
 
-      // 1) Ensure an assignment exists (idempotent, without ON CONFLICT)
-      const { data: existingAssignment, error: findErr } = await supabase
-        .from("assignments")
-        .select("id")
-        .eq("request_id", requestId)
-        .eq("mechanic_id", mechanicId)
-        .maybeSingle();
+      // 1) Update request row with a guard that it is unassigned or already assigned to this mechanic.
+      // Guard is done by matching assigned_mechanic_id IS NULL OR equals mechanicId.
+      // We can't do OR easily with PostgREST filters without extra complexity; do it in two steps:
+      // - First attempt update where assigned_mechanic_id is null
+      // - If no row updated, attempt update where assigned_mechanic_id == mechanicId (idempotent)
+      const newNotes = [...(existing?.notes || []), note];
 
-      if (findErr) {
-        throw new Error(friendlySupabaseErrorMessage(findErr, "Could not accept this request."));
-      }
+      let updatedRow = null;
 
-      if (existingAssignment?.id) {
-        const { error: updateAssignErr } = await supabase
-          .from("assignments")
-          .update({
-            mechanic_id: mechanicId,
-            request_id: requestId,
-          })
-          .eq("id", existingAssignment.id);
-
-        if (updateAssignErr) {
-          throw new Error(friendlySupabaseErrorMessage(updateAssignErr, "Could not accept this request."));
-        }
-      } else {
-        const { error: insertAssignErr } = await supabase.from("assignments").insert({
-          mechanic_id: mechanicId,
-          request_id: requestId,
-        });
-
-        if (insertAssignErr) {
-          throw new Error(friendlySupabaseErrorMessage(insertAssignErr, "Could not accept this request."));
-        }
-      }
-
-      // 2) Update request row (status transition + linking fields)
-      const { data: updated, error: reqErr } = await supabase
+      // Attempt 1: claim as unassigned
+      const { data: u1, error: e1 } = await supabase
         .from("requests")
         .update({
           assigned_mechanic_id: mechanicId,
           assigned_mechanic_email: mechanicEmail,
           status: "ASSIGNED",
-          notes: [...(existing?.notes || []), note],
+          notes: newNotes,
         })
         .eq("id", requestId)
+        .is("assigned_mechanic_id", null)
         .select("*")
         .maybeSingle();
 
-      if (reqErr) {
-        throw new Error(friendlySupabaseErrorMessage(reqErr, "Accepted assignment but failed to update request status."));
+      if (e1) {
+        throw new Error(friendlySupabaseErrorMessage(e1, "Could not accept this request."));
       }
 
-      // Return updated request so caller can refresh UI immediately without re-querying if desired
-      return updated ? normalizeRequestRow(updated) : true;
+      if (u1) {
+        updatedRow = u1;
+      } else {
+        // Attempt 2: idempotent accept if already assigned to this mechanic
+        const { data: u2, error: e2 } = await supabase
+          .from("requests")
+          .update({
+            assigned_mechanic_email: mechanicEmail,
+            status: "ASSIGNED",
+            notes: newNotes,
+          })
+          .eq("id", requestId)
+          .eq("assigned_mechanic_id", mechanicId)
+          .select("*")
+          .maybeSingle();
+
+        if (e2) throw new Error(friendlySupabaseErrorMessage(e2, "Could not accept this request."));
+        if (!u2) throw new Error("This request was already assigned to another mechanic.");
+        updatedRow = u2;
+      }
+
+      // 2) Credits deduction best-effort
+      try {
+        const fee = await getAcceptanceFeeBestEffort(supabase);
+        await tryDeductCreditsBestEffort({ supabase, mechanicId, amount: fee });
+      } catch (creditErr) {
+        // If credit deduction fails due to insufficient funds, revert assignment best-effort.
+        // We do not guarantee perfect rollback without transactions.
+        const msg = creditErr?.message || "";
+        if (msg.includes("Insufficient credits")) {
+          try {
+            await supabase
+              .from("requests")
+              .update({
+                assigned_mechanic_id: null,
+                assigned_mechanic_email: null,
+                status: "OPEN",
+                notes: existing?.notes || [],
+              })
+              .eq("id", requestId)
+              .eq("assigned_mechanic_id", mechanicId);
+          } catch {
+            // ignore rollback failure
+          }
+          throw creditErr;
+        }
+        // Otherwise ignore (table missing / RLS / etc.)
+      }
+
+      // 3) Ensure an assignment row exists (best-effort; ignore if table missing).
+      try {
+        const { data: existingAssignment } = await supabase.from("assignments").select("id").eq("request_id", requestId).eq("mechanic_id", mechanicId).maybeSingle();
+        if (!existingAssignment?.id) {
+          await supabase.from("assignments").insert({ mechanic_id: mechanicId, request_id: requestId });
+        }
+      } catch {
+        // ignore (schema might not have assignments)
+      }
+
+      return updatedRow ? normalizeRequestRow(updatedRow) : true;
     }
 
     // Mock mode behavior intact (also standardize to canonical)
@@ -748,10 +816,7 @@ export const dataService = {
     const supabase = getSupabase();
     if (supabase) {
       const existing = await this.getRequestById(requestId);
-      const { error } = await supabase
-        .from("requests")
-        .update({ status: canonical, notes: [...(existing?.notes || []), note] })
-        .eq("id", requestId);
+      const { error } = await supabase.from("requests").update({ status: canonical, notes: [...(existing?.notes || []), note] }).eq("id", requestId);
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not update status."));
       return true;
     }
