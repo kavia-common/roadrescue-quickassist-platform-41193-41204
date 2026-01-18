@@ -684,14 +684,17 @@ export const dataService = {
       /**
        * Accept flow (Supabase mode):
        * - MUST assign the request to the currently authenticated mechanic (auth.uid()).
-       * - MUST set requests.status = 'ASSIGNED' (canonical).
-       * - `assignments` table is OPTIONAL: some deployments don't have it, or RLS blocks it.
-       *   Therefore: request row update is the authoritative write; assignments is best-effort.
+       * - MUST be concurrency-safe: only claim if still unassigned OR already assigned to me.
+       *
+       * IMPORTANT RLS NOTE:
+       * Many Supabase setups allow UPDATE but restrict SELECT/RETURNING. In those cases,
+       * an UPDATE can succeed but `.select().maybeSingle()` returns `null` data.
+       * We must NOT interpret that as “assigned elsewhere” blindly.
        */
       const mechanicId = authedUser.id;
       const mechanicEmail = authedUser.email || mechanic.email;
 
-      // Preload existing request for note append and conflict checks.
+      // Preload existing request for note append and fast conflict detection.
       const existing = await this.getRequestById(requestId);
       if (!existing) throw new Error("Request not found.");
 
@@ -700,8 +703,8 @@ export const dataService = {
         throw new Error("This request was already assigned to another mechanic.");
       }
 
-      // 1) Update request row (authoritative). Guard against race: only assign if still unassigned OR already mine.
-      const { data: updated, error: reqErr } = await supabase
+      // 1) Authoritative conditional UPDATE. Do not depend on RETURNING; it may be blocked by RLS.
+      const updateQuery = supabase
         .from("requests")
         .update({
           assigned_mechanic_id: mechanicId,
@@ -710,45 +713,59 @@ export const dataService = {
           notes: [...(existing?.notes || []), note],
         })
         .eq("id", requestId)
-        // Only allow assignment if unassigned or already assigned to this mechanic
-        .or(`assigned_mechanic_id.is.null,assigned_mechanic_id.eq.${mechanicId}`)
-        .select("*")
-        .maybeSingle();
+        // Only allow assignment if unassigned OR already assigned to this mechanic
+        .or(`assigned_mechanic_id.is.null,assigned_mechanic_id.eq.${mechanicId}`);
+
+      // We still attempt to select for fast UI, but will fall back if it returns null due to RLS.
+      const { data: updated, error: reqErr } = await updateQuery.select("*").maybeSingle();
 
       if (reqErr) {
         throw new Error(
           friendlySupabaseErrorMessage(
             reqErr,
-            "Could not accept this request. If this is a permissions issue, ensure your mechanic account is approved and Supabase RLS policies allow assigning requests."
+            "Could not accept this request. If this is a permissions issue, ensure Supabase RLS policies allow mechanics to assign requests."
           )
         );
       }
-      if (!updated) {
-        // When RLS blocks returning rows or another mechanic won the race, Supabase may return null.
-        throw new Error("Could not accept this request. It may have been assigned to another mechanic.");
-      }
 
-      // 2) Best-effort: ensure an assignments row exists (non-blocking if table missing or RLS blocks it)
-      try {
-        const { data: existingAssignment } = await supabase
-          .from("assignments")
-          .select("id")
-          .eq("request_id", requestId)
-          .eq("mechanic_id", mechanicId)
-          .maybeSingle();
+      // If RETURNING is blocked (or 0 rows updated), resolve ambiguity with a follow-up SELECT.
+      const resolved = updated || (await this.getRequestById(requestId));
+      if (!resolved) throw new Error("Could not accept request (request not found after update).");
 
-        if (!existingAssignment?.id) {
-          await supabase.from("assignments").insert({
-            mechanic_id: mechanicId,
-            request_id: requestId,
-          });
+      // If the request is now assigned to me, accept succeeded (even if UPDATE didn't return a row).
+      if (resolved.assignedMechanicId === mechanicId) {
+        // 2) Best-effort: ensure an assignments row exists (non-blocking if table missing or RLS blocks it)
+        try {
+          const { data: existingAssignment } = await supabase
+            .from("assignments")
+            .select("id")
+            .eq("request_id", requestId)
+            .eq("mechanic_id", mechanicId)
+            .maybeSingle();
+
+          if (!existingAssignment?.id) {
+            await supabase.from("assignments").insert({
+              mechanic_id: mechanicId,
+              request_id: requestId,
+            });
+          }
+        } catch {
+          // Non-blocking: deployments may not have assignments or may restrict inserts via RLS.
         }
-      } catch {
-        // Non-blocking: deployments may not have assignments or may restrict inserts via RLS.
+
+        return normalizeRequestRow(resolved);
       }
 
-      // Return updated request for immediate UI feedback
-      return normalizeRequestRow(updated);
+      // If it became assigned to someone else, that's a genuine race.
+      if (resolved.assignedMechanicId && resolved.assignedMechanicId !== mechanicId) {
+        throw new Error("Could not accept this request. It was assigned to another mechanic.");
+      }
+
+      // Still unassigned: the conditional UPDATE matched zero rows (or RLS blocked update),
+      // but no other mechanic claimed it. This is most likely an RLS UPDATE policy issue.
+      throw new Error(
+        "Could not accept this request due to permissions or policy. If you are approved, ensure Supabase RLS allows mechanics to UPDATE requests where assigned_mechanic_id IS NULL."
+      );
     }
 
     // Mock mode behavior intact (also standardize to canonical)
