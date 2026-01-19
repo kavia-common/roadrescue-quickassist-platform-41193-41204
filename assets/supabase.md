@@ -19,4 +19,6 @@ Mechanic-specific usage:
 - reads unassigned requests (`assigned_mechanic_id is null`)
 - accepts a request (sets `assigned_mechanic_id`, `assigned_mechanic_email`, `status`)
 - updates request status and appends to `notes`
-- updates mechanic profile via `profiles.profile` json
+- updates mechanic profile via concrete columns:
+  - `profiles.display_name`
+  - `profiles.service_area`
