@@ -31,8 +31,8 @@ export function RequestDetailPage({ user }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  // Canonical statuses (shared across apps)
-  const allowedStatuses = useMemo(() => ["ASSIGNED", "EN_ROUTE", "WORKING", "COMPLETED"], []);
+  // Statuses allowed by DB CHECK constraint (authoritative)
+  const allowedStatuses = useMemo(() => ["assigned", "completed", "canceled"], []);
 
   const load = async () => {
     setError("");

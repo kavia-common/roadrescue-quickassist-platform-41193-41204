@@ -41,7 +41,7 @@ export function MyAssignmentsPage({ user }) {
     <div className="container">
       <div className="hero">
         <h1 className="h1">My assignments</h1>
-        <p className="lead">Update status as you progress: Accepted → En Route → Working → Completed.</p>
+        <p className="lead">Update status as you progress: Assigned → Completed (or Canceled).</p>
       </div>
 
       <Card title="Assigned requests" subtitle="Click into a request to update status.">

@@ -455,18 +455,19 @@ export const dataService = {
      * Create a new request.
      *
      * IMPORTANT:
-     * Supabase `requests.status` commonly has a CHECK constraint (e.g. requests_status_check)
-     * that only allows a fixed set of canonical tokens (typically UPPERCASE).
+     * The user's Postgres CHECK constraint `requests_status_check` allows ONLY:
+     *   - open
+     *   - assigned
+     *   - completed
+     *   - canceled
      *
-     * Therefore:
-     * - Always write a canonical status via normalizeStatus()
-     * - Do NOT write lowercase values like "open"
+     * Therefore we MUST write a DB-permitted lowercase token (via normalizeStatus()).
      */
     ensureSeedData();
     const supabase = getSupabase();
     const nowIso = new Date().toISOString();
 
-    const canonicalStatus = normalizeStatus("OPEN");
+    const canonicalStatus = normalizeStatus("open");
 
     const request = {
       id: uid("req"),
@@ -742,7 +743,7 @@ export const dataService = {
         .update({
           assigned_mechanic_id: mechanicId,
           assigned_mechanic_email: mechanicEmail,
-          status: "ASSIGNED",
+          status: normalizeStatus("assigned"),
           notes: [...(existing?.notes || []), note],
         })
         .eq("id", requestId)
@@ -767,7 +768,7 @@ export const dataService = {
       ...r,
       assignedMechanicId: mechanic.id,
       assignedMechanicEmail: mechanic.email,
-      status: "ASSIGNED",
+      status: normalizeStatus("assigned"),
       notes: [...(r.notes || []), note],
     };
     setLocalRequests(all);
