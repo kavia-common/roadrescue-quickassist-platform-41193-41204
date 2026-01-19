@@ -452,13 +452,22 @@ export const dataService = {
   // PUBLIC_INTERFACE
   async createRequest({ user, vehicle, issueDescription, contact }) {
     /**
-     * Create a new request as a mechanic (if allowed).
-     * Always set status='open' per DB constraint; do not send custom 'id', and only provide null/valid UUID for optional fields.
-     * This method is included for completeness and cross-portal consistency; actual use depends on portal's allowed flows.
+     * Create a new request.
+     *
+     * IMPORTANT:
+     * Supabase `requests.status` commonly has a CHECK constraint (e.g. requests_status_check)
+     * that only allows a fixed set of canonical tokens (typically UPPERCASE).
+     *
+     * Therefore:
+     * - Always write a canonical status via normalizeStatus()
+     * - Do NOT write lowercase values like "open"
      */
     ensureSeedData();
     const supabase = getSupabase();
     const nowIso = new Date().toISOString();
+
+    const canonicalStatus = normalizeStatus("OPEN");
+
     const request = {
       id: uid("req"),
       createdAt: nowIso,
@@ -467,7 +476,7 @@ export const dataService = {
       vehicle,
       issueDescription,
       contact,
-      status: "open",
+      status: canonicalStatus,
       assignedMechanicId: null,
       assignedMechanicEmail: null,
       notes: [],
@@ -481,11 +490,12 @@ export const dataService = {
         vehicle,
         issue_description: issueDescription,
         contact,
-        status: "open",
+        status: canonicalStatus,
         assigned_mechanic_id: null,
         assigned_mechanic_email: null,
         notes: [],
       };
+
       const { data, error } = await supabase.from("requests").insert(insertPayload).select().maybeSingle();
 
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not create request."));
