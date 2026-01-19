@@ -6,20 +6,93 @@ import { MapView } from "../components/MapView";
 import { dataService } from "../services/dataService";
 import { statusLabel } from "../services/statusUtils";
 
+function toFiniteNumber(v) {
+  if (v === null || v === undefined) return null;
+  const n = typeof v === "number" ? v : Number(String(v).trim());
+  if (!Number.isFinite(n)) return null;
+  return n;
+}
+
 function extractLatLng(req) {
-  // Future-proofing: if the request ever includes location fields, support common shapes.
-  // Current repo schema may not provide this yet, so this will usually be null.
+  /**
+   * Best-effort coordinate extraction.
+   * Supports:
+   * - req.location {lat,lng} (numbers or numeric strings)
+   * - flat columns: latitude/longitude OR lat/lng (numbers or numeric strings)
+   */
   const loc = req?.location;
-  if (loc && typeof loc === "object" && typeof loc.lat === "number" && typeof loc.lng === "number") {
-    return { lat: loc.lat, lng: loc.lng };
-  }
-  if (typeof req?.latitude === "number" && typeof req?.longitude === "number") {
-    return { lat: req.latitude, lng: req.longitude };
-  }
-  if (typeof req?.lat === "number" && typeof req?.lng === "number") {
-    return { lat: req.lat, lng: req.lng };
-  }
+
+  const locLat = toFiniteNumber(loc?.lat);
+  const locLng = toFiniteNumber(loc?.lng);
+  if (locLat != null && locLng != null) return { lat: locLat, lng: locLng };
+
+  const lat1 = toFiniteNumber(req?.latitude);
+  const lng1 = toFiniteNumber(req?.longitude);
+  if (lat1 != null && lng1 != null) return { lat: lat1, lng: lng1 };
+
+  const lat2 = toFiniteNumber(req?.lat);
+  const lng2 = toFiniteNumber(req?.lng);
+  if (lat2 != null && lng2 != null) return { lat: lat2, lng: lng2 };
+
   return null;
+}
+
+function extractAddressText(req) {
+  /**
+   * Best-effort address/location string for geocoding.
+   * Supports:
+   * - req.location JSON object with address-ish fields
+   * - common flat fields used by list filtering and some DB schemas
+   */
+  const loc = req?.location;
+  const nested =
+    loc && typeof loc === "object"
+      ? loc.formatted_address || loc.formattedAddress || loc.address || loc.name || loc.location_text || loc.locationText || ""
+      : "";
+
+  return (
+    nested ||
+    req?.locationText ||
+    req?.location_text ||
+    req?.pickupLocation ||
+    req?.pickup_location ||
+    req?.address ||
+    ""
+  )
+    .toString()
+    .trim();
+}
+
+async function geocodeAddress(address) {
+  /**
+   * Client-side geocoding using OpenStreetMap Nominatim (no API key).
+   * This is best-effort and may be rate-limited in production; for scale, replace with
+   * a backend/edge function or a paid geocoding provider.
+   */
+  const q = (address || "").trim();
+  if (!q) return null;
+
+  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
+
+  const resp = await fetch(url, {
+    method: "GET",
+    headers: {
+      // Nominatim requires a valid User-Agent/Referer; browsers limit User-Agent control,
+      // so we at least send a descriptive Referer and Accept.
+      Accept: "application/json",
+    },
+  });
+
+  if (!resp.ok) return null;
+  const data = await resp.json();
+  const hit = Array.isArray(data) ? data[0] : null;
+  if (!hit) return null;
+
+  const lat = toFiniteNumber(hit.lat);
+  const lng = toFiniteNumber(hit.lon);
+  if (lat == null || lng == null) return null;
+
+  return { lat, lng };
 }
 
 // PUBLIC_INTERFACE
@@ -30,6 +103,10 @@ export function RequestDetailPage({ user }) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  // Map marker derived either from stored coordinates or best-effort geocoding from address.
+  const [mapMarker, setMapMarker] = useState(null);
+  const [mapStatus, setMapStatus] = useState({ type: "", message: "" });
 
   // Statuses allowed by DB CHECK constraint (authoritative)
   const allowedStatuses = useMemo(() => ["assigned", "completed", "canceled"], []);
@@ -48,6 +125,53 @@ export function RequestDetailPage({ user }) {
   useEffect(() => {
     load();
   }, [requestId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    // Whenever the loaded request changes, recompute the best marker.
+    const direct = extractLatLng(req);
+    if (direct) {
+      setMapMarker(direct);
+      setMapStatus({ type: "", message: "" });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const addr = extractAddressText(req);
+    if (!addr) {
+      setMapMarker(null);
+      setMapStatus({ type: "", message: "" });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setMapStatus({ type: "info", message: "Finding location from address…" });
+
+    (async () => {
+      try {
+        const geo = await geocodeAddress(addr);
+        if (cancelled) return;
+        if (geo) {
+          setMapMarker(geo);
+          setMapStatus({ type: "", message: "" });
+        } else {
+          setMapMarker(null);
+          setMapStatus({ type: "info", message: "Could not geocode address for this request. Showing default map center." });
+        }
+      } catch {
+        if (cancelled) return;
+        setMapMarker(null);
+        setMapStatus({ type: "info", message: "Geocoding failed. Showing default map center." });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [req?.id]); // keyed off req.id so status updates/notes don't re-geocode unnecessarily
 
   const setStatus = async (status) => {
     setBusy(true);
@@ -117,7 +241,7 @@ export function RequestDetailPage({ user }) {
   }
   if (!req) return <div className="container"><div className="skeleton">Loading…</div></div>;
 
-  const marker = extractLatLng(req);
+  const marker = mapMarker;
 
   return (
     <div className="container">
@@ -173,14 +297,26 @@ export function RequestDetailPage({ user }) {
       </div>
 
       <div style={{ marginTop: 12 }}>
+        {mapStatus.message ? (
+          <div className="alert alert-info" style={{ marginBottom: 10 }}>
+            {mapStatus.message}
+          </div>
+        ) : null}
+
         <MapView
           center={marker || undefined}
           marker={marker || undefined}
+          zoom={marker ? 15 : 12}
           height={280}
           ariaLabel="Request location map"
+          fitToMarker
         />
         <div className="hint" style={{ marginTop: 8 }}>
-          {marker ? "Showing reported coordinates." : "No coordinates on this request yet — showing Chennai as default."}
+          {marker
+            ? extractLatLng(req)
+              ? "Showing reported coordinates."
+              : "Showing best-effort geocoded location from address."
+            : "No usable coordinates/address on this request yet — showing Chennai as default."}
         </div>
       </div>
 

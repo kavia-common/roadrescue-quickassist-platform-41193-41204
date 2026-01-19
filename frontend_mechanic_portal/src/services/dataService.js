@@ -227,6 +227,16 @@ function normalizeContact(raw) {
 }
 
 function normalizeRequestRow(r) {
+  /**
+   * Normalize a request row into the mechanic portal's canonical shape.
+   *
+   * IMPORTANT:
+   * This portal must be tolerant of schema variance across Supabase deployments.
+   * We therefore:
+   * - keep vehicle/contact normalization logic defensive
+   * - preserve *location-related fields* (address + coordinates) when present so the
+   *   Request Detail map can show a marker or geocode from address.
+   */
   return {
     id: r.id,
     createdAt: r.created_at ?? r.createdAt ?? "",
@@ -235,6 +245,23 @@ function normalizeRequestRow(r) {
     vehicle: normalizeVehicle(r),
     issueDescription: r.issue_description ?? r.issueDescription ?? "",
     contact: normalizeContact(r),
+
+    /**
+     * Location fields (best-effort passthrough).
+     * We intentionally do not attempt to canonicalize into a single schema here,
+     * because upstream apps/DBs might store different shapes (JSONB or flat cols).
+     *
+     * RequestDetailPage.extractLatLng() and extractAddressText() will interpret these.
+     */
+    location: r.location ?? null,
+    lat: r.lat ?? null,
+    lng: r.lng ?? null,
+    latitude: r.latitude ?? null,
+    longitude: r.longitude ?? null,
+    address: r.address ?? null,
+    locationText: r.location_text ?? r.locationText ?? null,
+    pickupLocation: r.pickup_location ?? r.pickupLocation ?? null,
+
     // IMPORTANT: keep status canonical across apps
     status: normalizeStatus(r.status ?? ""),
     assignedMechanicId: r.assigned_mechanic_id ?? r.assignedMechanicId ?? null,

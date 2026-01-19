@@ -25,6 +25,7 @@ export function MapView({
   className = "",
   showMarker = true,
   ariaLabel = "Map",
+  fitToMarker = false,
 }) {
   /** Reusable Leaflet MapView (CDN-loaded Leaflet) for mechanic portal request details. */
   const containerRef = useRef(null);
@@ -46,6 +47,12 @@ export function MapView({
     if (lat == null || lng == null) return null;
     return { lat, lng };
   }, [marker?.lat, marker?.lng]);
+
+  const effectiveCenter = useMemo(() => {
+    // If caller wants the marker to be the primary focus, center on it when present.
+    if (fitToMarker && safeMarker) return safeMarker;
+    return safeCenter;
+  }, [fitToMarker, safeMarker, safeCenter]);
 
   useEffect(() => {
     let tries = 0;
@@ -77,7 +84,7 @@ export function MapView({
     const L = window.L;
 
     const map = L.map(containerRef.current, {
-      center: [safeCenter.lat, safeCenter.lng],
+      center: [effectiveCenter.lat, effectiveCenter.lng],
       zoom,
       zoomControl: true,
     });
@@ -114,8 +121,8 @@ export function MapView({
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    map.setView([safeCenter.lat, safeCenter.lng], zoom, { animate: false });
-  }, [safeCenter.lat, safeCenter.lng, zoom]);
+    map.setView([effectiveCenter.lat, effectiveCenter.lng], zoom, { animate: false });
+  }, [effectiveCenter.lat, effectiveCenter.lng, zoom]);
 
   useEffect(() => {
     const map = mapRef.current;
