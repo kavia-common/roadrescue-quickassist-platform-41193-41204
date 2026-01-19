@@ -9,26 +9,69 @@
 
 import { normalizeStatus } from "./statusUtils";
 
-function toLowerSafe(v) {
+/**
+ * Normalize free-text for resilient "contains" matching:
+ * - trim
+ * - collapse whitespace
+ * - lowercase
+ * - remove diacritics (e.g., "São" -> "sao")
+ * - remove punctuation to reduce false negatives (e.g., "Downtown," -> "downtown")
+ */
+function normalizeText(v) {
   if (v === null || v === undefined) return "";
-  return String(v).toLowerCase();
+  let s = String(v);
+
+  // Normalize unicode + strip diacritics
+  try {
+    s = s.normalize("NFKD").replace(/[̀-ͯ]/g, "");
+  } catch {
+    // If normalize isn't supported, fall back gracefully.
+  }
+
+  // Collapse whitespace + lowercase
+  s = s.replace(/\s+/g, " ").trim().toLowerCase();
+
+  // Replace punctuation with spaces, then collapse again
+  s = s.replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+
+  return s;
 }
 
-function containsCI(haystack, needle) {
-  const n = toLowerSafe(needle).trim();
+function containsNormalized(haystack, needle) {
+  const n = normalizeText(needle);
   if (!n) return true;
-  return toLowerSafe(haystack).includes(n);
+  return normalizeText(haystack).includes(n);
 }
 
 function extractLocationText(request) {
-  // Future-proof: support different schema shapes without breaking.
-  // We try several common fields; if none exist, return empty string.
+  /**
+   * IMPORTANT:
+   * Requests returned by dataService.normalizeRequestRow() currently do NOT
+   * include a canonical "locationText" field, so filtering must check multiple
+   * possible schema shapes directly.
+   *
+   * We support:
+   * - nested JSON: request.location.{name,address,formatted_address}
+   * - common flat columns: location, location_text, location_name, pickup_location, address, address_line, city, area
+   */
+  const loc = request?.location;
+
+  const nested =
+    (loc && typeof loc === "object" && (loc.address || loc.name || loc.formatted_address || loc.formattedAddress)) || null;
+
   return (
-    request?.location?.address ||
-    request?.location?.name ||
+    nested ||
     request?.locationText ||
+    request?.location_text ||
+    request?.location_name ||
     request?.location_address ||
+    request?.pickup_location ||
+    request?.pickupLocation ||
     request?.address ||
+    request?.address_line ||
+    request?.addressLine ||
+    request?.city ||
+    request?.area ||
     request?.serviceArea ||
     ""
   );
@@ -43,8 +86,8 @@ export function filterRequests(rows, filters) {
   const hasStatus = Boolean((filters?.status || "").trim());
 
   return (rows || []).filter((r) => {
-    const okLocation = containsCI(extractLocationText(r), locationNeedle);
-    const okIssue = containsCI(r?.issueDescription || "", issueNeedle);
+    const okLocation = containsNormalized(extractLocationText(r), locationNeedle);
+    const okIssue = containsNormalized(r?.issueDescription || "", issueNeedle);
     const okStatus = hasStatus ? normalizeStatus(r?.status) === statusNeedle : true;
     return okLocation && okIssue && okStatus;
   });
