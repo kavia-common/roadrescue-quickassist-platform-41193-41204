@@ -29,11 +29,18 @@ export function DashboardPage({ user }) {
   const [busyId, setBusyId] = useState("");
 
   const [filters, setFilters] = useState(() => {
+    /**
+     * Do NOT restore/persist location:
+     * Users reported an unintended default (e.g., "chengalpattu") being applied via localStorage.
+     * Location filtering must apply only to current user input.
+     *
+     * We still persist non-location filters (issue/status) as a convenience.
+     */
     try {
       const raw = window.localStorage.getItem(FILTERS_STORAGE_KEY);
       const parsed = raw ? JSON.parse(raw) : null;
       return {
-        location: parsed?.location || "",
+        location: "",
         issue: parsed?.issue || "",
         status: parsed?.status || "",
       };
@@ -42,14 +49,20 @@ export function DashboardPage({ user }) {
     }
   });
 
-  // Persist last-used filters so they survive refresh/navigation.
+  // Persist last-used NON-location filters so they survive refresh/navigation.
   useEffect(() => {
     try {
-      window.localStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(filters));
+      window.localStorage.setItem(
+        FILTERS_STORAGE_KEY,
+        JSON.stringify({
+          issue: filters.issue || "",
+          status: filters.status || "",
+        })
+      );
     } catch {
       // ignore storage failures (private mode, etc.)
     }
-  }, [filters]);
+  }, [filters.issue, filters.status]);
 
   const load = async () => {
     setError("");

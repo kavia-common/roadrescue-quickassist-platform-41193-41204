@@ -28,11 +28,18 @@ export function MyAssignmentsPage({ user }) {
   const [error, setError] = useState("");
 
   const [filters, setFilters] = useState(() => {
+    /**
+     * Do NOT restore/persist location:
+     * Users reported an unintended default (e.g., "chengalpattu") being applied via localStorage.
+     * Location filtering must apply only to current user input.
+     *
+     * We still persist non-location filters (issue/status) as a convenience.
+     */
     try {
       const raw = window.localStorage.getItem(FILTERS_STORAGE_KEY);
       const parsed = raw ? JSON.parse(raw) : null;
       return {
-        location: parsed?.location || "",
+        location: "",
         issue: parsed?.issue || "",
         status: parsed?.status || "",
       };
@@ -43,11 +50,17 @@ export function MyAssignmentsPage({ user }) {
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(filters));
+      window.localStorage.setItem(
+        FILTERS_STORAGE_KEY,
+        JSON.stringify({
+          issue: filters.issue || "",
+          status: filters.status || "",
+        })
+      );
     } catch {
       // ignore
     }
-  }, [filters]);
+  }, [filters.issue, filters.status]);
 
   const load = async () => {
     setError("");
