@@ -227,6 +227,16 @@ function normalizeContact(raw) {
 }
 
 function normalizeRequestRow(r) {
+  /**
+   * Normalize a request row into the mechanic portal's canonical shape.
+   *
+   * IMPORTANT:
+   * This portal must be tolerant of schema variance across Supabase deployments.
+   * We therefore:
+   * - keep vehicle/contact normalization logic defensive
+   * - preserve *location-related fields* (address + coordinates) when present so the
+   *   Request Detail map can show a marker or geocode from address.
+   */
   return {
     id: r.id,
     createdAt: r.created_at ?? r.createdAt ?? "",
@@ -235,6 +245,23 @@ function normalizeRequestRow(r) {
     vehicle: normalizeVehicle(r),
     issueDescription: r.issue_description ?? r.issueDescription ?? "",
     contact: normalizeContact(r),
+
+    /**
+     * Location fields (best-effort passthrough).
+     * We intentionally do not attempt to canonicalize into a single schema here,
+     * because upstream apps/DBs might store different shapes (JSONB or flat cols).
+     *
+     * RequestDetailPage.extractLatLng() and extractAddressText() will interpret these.
+     */
+    location: r.location ?? null,
+    lat: r.lat ?? null,
+    lng: r.lng ?? null,
+    latitude: r.latitude ?? null,
+    longitude: r.longitude ?? null,
+    address: r.address ?? null,
+    locationText: r.location_text ?? r.locationText ?? null,
+    pickupLocation: r.pickup_location ?? r.pickupLocation ?? null,
+
     // IMPORTANT: keep status canonical across apps
     status: normalizeStatus(r.status ?? ""),
     assignedMechanicId: r.assigned_mechanic_id ?? r.assignedMechanicId ?? null,
@@ -245,10 +272,20 @@ function normalizeRequestRow(r) {
 
 async function supaGetUserRole(supabase, userId, email) {
   try {
-    // NOTE: Mechanic approval is NOT the `approved` boolean (legacy); it is `mechanic_status`.
-    // Keep reading role/profile, but do not infer approval from here.
-    const { data, error } = await supabase.from("profiles").select("role,profile").eq("id", userId).maybeSingle();
+    /**
+     * IMPORTANT (schema alignment):
+     * Some deployments do NOT have a `profiles.profile` JSON column.
+     * The mechanic portal profile editor only needs display_name + service_area,
+     * so we read those concrete columns instead.
+     */
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("role,display_name,service_area")
+      .eq("id", userId)
+      .maybeSingle();
+
     if (error) return { role: "user", profile: null };
+
     if (!data) {
       // Best-effort: many setups have a DB trigger that creates profiles row.
       // If insert is blocked (RLS), we still proceed and let later calls fail with a friendly error.
@@ -259,7 +296,14 @@ async function supaGetUserRole(supabase, userId, email) {
       }
       return { role: "user", profile: null };
     }
-    return { role: data.role || "user", profile: data.profile || null };
+
+    // Keep returning a `profile` object for compatibility with existing UI code.
+    const profile = {
+      name: data.display_name || "",
+      serviceArea: data.service_area || "",
+    };
+
+    return { role: data.role || "user", profile };
   } catch {
     return { role: "user", profile: null };
   }
@@ -452,13 +496,23 @@ export const dataService = {
   // PUBLIC_INTERFACE
   async createRequest({ user, vehicle, issueDescription, contact }) {
     /**
-     * Create a new request as a mechanic (if allowed).
-     * Always set status='open' per DB constraint; do not send custom 'id', and only provide null/valid UUID for optional fields.
-     * This method is included for completeness and cross-portal consistency; actual use depends on portal's allowed flows.
+     * Create a new request.
+     *
+     * IMPORTANT:
+     * The user's Postgres CHECK constraint `requests_status_check` allows ONLY:
+     *   - open
+     *   - assigned
+     *   - completed
+     *   - canceled
+     *
+     * Therefore we MUST write a DB-permitted lowercase token (via normalizeStatus()).
      */
     ensureSeedData();
     const supabase = getSupabase();
     const nowIso = new Date().toISOString();
+
+    const canonicalStatus = normalizeStatus("open");
+
     const request = {
       id: uid("req"),
       createdAt: nowIso,
@@ -467,7 +521,7 @@ export const dataService = {
       vehicle,
       issueDescription,
       contact,
-      status: "open",
+      status: canonicalStatus,
       assignedMechanicId: null,
       assignedMechanicEmail: null,
       notes: [],
@@ -481,11 +535,12 @@ export const dataService = {
         vehicle,
         issue_description: issueDescription,
         contact,
-        status: "open",
+        status: canonicalStatus,
         assigned_mechanic_id: null,
         assigned_mechanic_email: null,
         notes: [],
       };
+
       const { data, error } = await supabase.from("requests").insert(insertPayload).select().maybeSingle();
 
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not create request."));
@@ -732,7 +787,7 @@ export const dataService = {
         .update({
           assigned_mechanic_id: mechanicId,
           assigned_mechanic_email: mechanicEmail,
-          status: "ASSIGNED",
+          status: normalizeStatus("assigned"),
           notes: [...(existing?.notes || []), note],
         })
         .eq("id", requestId)
@@ -757,7 +812,7 @@ export const dataService = {
       ...r,
       assignedMechanicId: mechanic.id,
       assignedMechanicEmail: mechanic.email,
-      status: "ASSIGNED",
+      status: normalizeStatus("assigned"),
       notes: [...(r.notes || []), note],
     };
     setLocalRequests(all);
@@ -799,7 +854,28 @@ export const dataService = {
     ensureSeedData();
     const supabase = getSupabase();
     if (supabase) {
-      const { error } = await supabase.from("profiles").update({ profile }).eq("id", userId);
+      /**
+       * IMPORTANT (schema alignment):
+       * Do NOT write to `profiles.profile` (may not exist).
+       *
+       * Supported columns for this portal's Profile page:
+       * - profiles.display_name (text)
+       * - profiles.service_area (text)
+       *
+       * We accept either:
+       * - { name, serviceArea } (current UI shape)
+       * - { displayName, serviceArea }
+       * and map into DB columns.
+       */
+      const name = (profile?.name ?? profile?.displayName ?? "").toString().trim();
+      const serviceArea = (profile?.serviceArea ?? "").toString().trim();
+
+      const updatePayload = {
+        display_name: name || null,
+        service_area: serviceArea || null,
+      };
+
+      const { error } = await supabase.from("profiles").update(updatePayload).eq("id", userId);
       if (error) throw new Error(friendlySupabaseErrorMessage(error, "Could not save profile."));
       return true;
     }
