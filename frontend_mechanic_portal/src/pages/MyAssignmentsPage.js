@@ -1,8 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Card } from "../components/ui/Card";
 import { Table } from "../components/ui/Table";
+import { Button } from "../components/ui/Button";
+import { RequestFiltersCard } from "../components/RequestFiltersCard";
 import { dataService } from "../services/dataService";
+import { filterRequests, countActiveFilters } from "../services/requestFilterUtils";
 import { statusBadgeClass, statusLabel } from "../services/statusUtils";
 
 function statusBadge(status) {
@@ -16,11 +19,41 @@ function renderVehicleCell(vehicle) {
   return label || "—";
 }
 
+const FILTERS_STORAGE_KEY = "rrqa.mechanic.assignmentsFilters";
+
 // PUBLIC_INTERFACE
 export function MyAssignmentsPage({ user }) {
   /** Shows requests assigned to current mechanic. */
   const [rows, setRows] = useState([]);
   const [error, setError] = useState("");
+
+  const [filters, setFilters] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem(FILTERS_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      return {
+        location: parsed?.location || "",
+        issue: parsed?.issue || "",
+        status: parsed?.status || "",
+      };
+    } catch {
+      return { location: "", issue: "", status: "" };
+    }
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(filters));
+    } catch {
+      // ignore
+    }
+  }, [filters]);
+
+  const load = async () => {
+    setError("");
+    const list = await dataService.listMyAssignments(user.id);
+    setRows(list);
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -37,6 +70,9 @@ export function MyAssignmentsPage({ user }) {
     };
   }, [user.id]);
 
+  const filteredRows = useMemo(() => filterRequests(rows, filters), [rows, filters]);
+  const activeFilterCount = useMemo(() => countActiveFilters(filters), [filters]);
+
   return (
     <div className="container">
       <div className="hero">
@@ -44,11 +80,38 @@ export function MyAssignmentsPage({ user }) {
         <p className="lead">Update status as you progress: Assigned → Completed (or Canceled).</p>
       </div>
 
-      <Card title="Assigned requests" subtitle="Click into a request to update status.">
+      <div style={{ marginBottom: 12 }}>
+        <RequestFiltersCard
+          title="Filters"
+          subtitle="Filter your assignments by location, issue description, and status."
+          storageKey={FILTERS_STORAGE_KEY}
+          filters={filters}
+          onFiltersChange={(next) => setFilters(next)}
+          onClear={() => setFilters({ location: "", issue: "", status: "" })}
+        />
+      </div>
+
+      <Card
+        title="Assigned requests"
+        subtitle={activeFilterCount ? `Showing ${filteredRows.length} of ${rows.length} (filtered).` : "Click into a request to update status."}
+        actions={
+          <Button variant="ghost" size="sm" onClick={load}>
+            Refresh
+          </Button>
+        }
+      >
         {error ? <div className="alert alert-error">{error}</div> : null}
         <Table
           columns={[
-            { key: "id", header: "Request", render: (r) => <Link className="link" to={`/requests/${r.id}`}>{r.id.slice(0, 8)}</Link> },
+            {
+              key: "id",
+              header: "Request",
+              render: (r) => (
+                <Link className="link" to={`/requests/${r.id}`}>
+                  {r.id.slice(0, 8)}
+                </Link>
+              ),
+            },
             {
               key: "vehicle",
               header: "Vehicle",
@@ -57,7 +120,7 @@ export function MyAssignmentsPage({ user }) {
             { key: "status", header: "Status", render: (r) => statusBadge(r.status) },
             { key: "userEmail", header: "Customer", render: (r) => r.userEmail },
           ]}
-          rows={rows}
+          rows={filteredRows}
           rowKey={(r) => r.id}
         />
       </Card>

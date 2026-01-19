@@ -1,9 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Card } from "../components/ui/Card";
 import { Table } from "../components/ui/Table";
 import { Button } from "../components/ui/Button";
+import { RequestFiltersCard } from "../components/RequestFiltersCard";
 import { dataService } from "../services/dataService";
+import { filterRequests, countActiveFilters } from "../services/requestFilterUtils";
 import { statusBadgeClass, statusLabel } from "../services/statusUtils";
 
 function statusBadge(status) {
@@ -17,12 +19,37 @@ function renderVehicleCell(vehicle) {
   return label || "—";
 }
 
+const FILTERS_STORAGE_KEY = "rrqa.mechanic.dashboardFilters";
+
 // PUBLIC_INTERFACE
 export function DashboardPage({ user }) {
   /** Shows available requests; mechanics can accept them. */
   const [rows, setRows] = useState([]);
   const [error, setError] = useState("");
   const [busyId, setBusyId] = useState("");
+
+  const [filters, setFilters] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem(FILTERS_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      return {
+        location: parsed?.location || "",
+        issue: parsed?.issue || "",
+        status: parsed?.status || "",
+      };
+    } catch {
+      return { location: "", issue: "", status: "" };
+    }
+  });
+
+  // Persist last-used filters so they survive refresh/navigation.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(filters));
+    } catch {
+      // ignore storage failures (private mode, etc.)
+    }
+  }, [filters]);
 
   const load = async () => {
     setError("");
@@ -56,6 +83,9 @@ export function DashboardPage({ user }) {
     }
   };
 
+  const filteredRows = useMemo(() => filterRequests(rows, filters), [rows, filters]);
+  const activeFilterCount = useMemo(() => countActiveFilters(filters), [filters]);
+
   return (
     <div className="container">
       <div className="hero">
@@ -69,11 +99,42 @@ export function DashboardPage({ user }) {
         </div>
       ) : null}
 
-      <Card title="Available requests" subtitle="Accept to move into My Assignments.">
+      <div style={{ marginBottom: 12 }}>
+        <RequestFiltersCard
+          title="Filters"
+          subtitle="Filter available requests by location, issue description, and status."
+          storageKey={FILTERS_STORAGE_KEY}
+          filters={filters}
+          onFiltersChange={(next) => setFilters(next)}
+          onClear={() => setFilters({ location: "", issue: "", status: "" })}
+        />
+      </div>
+
+      <Card
+        title="Available requests"
+        subtitle={
+          activeFilterCount
+            ? `Showing ${filteredRows.length} of ${rows.length} (filtered).`
+            : "Accept to move into My Assignments."
+        }
+        actions={
+          <Button variant="ghost" size="sm" onClick={load}>
+            Refresh
+          </Button>
+        }
+      >
         {error ? <div className="alert alert-error">{error}</div> : null}
         <Table
           columns={[
-            { key: "id", header: "Request", render: (r) => <Link className="link" to={`/requests/${r.id}`}>{r.id.slice(0, 8)}</Link> },
+            {
+              key: "id",
+              header: "Request",
+              render: (r) => (
+                <Link className="link" to={`/requests/${r.id}`}>
+                  {r.id.slice(0, 8)}
+                </Link>
+              ),
+            },
             { key: "createdAt", header: "Created", render: (r) => new Date(r.createdAt).toLocaleString() },
             {
               key: "vehicle",
@@ -91,7 +152,7 @@ export function DashboardPage({ user }) {
               ),
             },
           ]}
-          rows={rows}
+          rows={filteredRows}
           rowKey={(r) => r.id}
         />
       </Card>
